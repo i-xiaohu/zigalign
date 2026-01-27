@@ -666,43 +666,43 @@ int main(int argc, char *argv[]) {
 	while ((c = getopt(argc, argv, "A:B:O:E:V:C:u:d:p:a:b:o:e:v:1")) >= 0) {
 		switch (c) {
 			case 'A':
-				opt.mat_score = str2int(optarg);
+				opt.mat_score = abs(str2int(optarg));
 				break;
 			case 'B':
-				opt.mis_pen = str2int(optarg);
+				opt.mis_pen = -abs(str2int(optarg));
 				break;
 			case 'O':
-				opt.gap_o = str2int(optarg);
+				opt.gap_o = -abs(str2int(optarg));
 				break;
 			case 'E':
-				opt.gap_e = str2int(optarg);
+				opt.gap_e = -abs(str2int(optarg));
 				break;
 			case 'V':
-				opt.cnv_o = str2int(optarg);
+				opt.cnv_o = -abs(str2int(optarg));
 				break;
 			case 'C':
-				opt.cnv_e = str2int(optarg);
+				opt.cnv_e = -abs(str2int(optarg));
 				break;
 			case 'u':
-				opt.min_unit_size = str2int(optarg);
+				opt.min_unit_size = abs(str2int(optarg));
 				break;
 			case 'd':
-				opt.open_tr_pen = str2int(optarg);
+				opt.open_tr_pen = -abs(str2int(optarg));
 				break;
 			case 'p':
-				opt.close_tr_pen = str2int(optarg);
+				opt.close_tr_pen = -abs(str2int(optarg));
 				break;
 			case 'a':
-				opt.tr_mat_score = str2int(optarg);
+				opt.tr_mat_score = abs(str2int(optarg));
 				break;
 			case 'b':
-				opt.tr_mis_pen = str2int(optarg);
+				opt.tr_mis_pen = -abs(str2int(optarg));
 				break;
 			case 'o':
-				opt.tr_gap_o = str2int(optarg);
+				opt.tr_gap_o = -abs(str2int(optarg));
 				break;
 			case 'e':
-				opt.tr_gap_e = str2int(optarg);
+				opt.tr_gap_e = -abs(str2int(optarg));
 				break;
 			case 'v':
 				opt.vis_fn = optarg;
