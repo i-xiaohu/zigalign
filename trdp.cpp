@@ -270,13 +270,13 @@ vector<RepUnit> self_alignment(const TrdpOptions &o, int n, const char *seq)
 		while (ti > 0 and tj > 0) {
 			const DpCell &c = dp[ti][tj];
 			if (c.event != te) {
-				out << ti << "\t" << tj << endl;
+				out << ti << "\t" << tj << "\t" << c.event << endl;
 			}
 			ti = c.pi;
 			tj = c.pj;
 			te = c.event;
 		}
-		out << 0 << "\t" << 0 << endl;
+		out << 0 << "\t" << 0 << "\t" << te << endl;
 		out.close();
 	}
 
