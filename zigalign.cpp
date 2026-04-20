@@ -15,44 +15,43 @@
 #include "utils.h"
 using namespace std;
 
-// TRDP parameters
-struct TrdpOptions {
-	// Scoring matrix for alignment of two sequences
+// Zigalign parameters
+struct ZigOptions {
+	// Scoring matrix for non-repeat regions
 	int mat_score;
 	int mis_pen;
 	int gap_o;
 	int gap_e;
-	// Penalty for copy-number variation
-	int cnv_o;
-	int cnv_e;
 	// Minimum repeat unit size (to reduce random repeats)
 	int min_unit_size;
-	// Scoring matrix for tandem repeats identification in self-alignment (reward more and/or penalize less)
+	// Scoring matrix for tandem repeats in self-alignment (reward more and/or penalize less)
 	int tr_mat_score;
 	int tr_mis_pen;
 	int tr_gap_o;
 	int tr_gap_e;
-	// It is necessary to penalize for opening/closing tandem repeats
+	// Penalty for opening/closing tandem repeats
 	int open_tr_pen;
 	int close_tr_pen;
+	// Penalty for deleting duplications
+	int del_dup;
+	// Visualization
 	const char *vis_fn;
 
-	TrdpOptions() {
-		min_unit_size = 5;
-		cnv_o = -15; // TODO: how to set this value?
-		cnv_e = -3;
+	ZigOptions() {
 		// Scoring matrix for original SW
 		mat_score = 1;
 		mis_pen = -4;
 		gap_o = -6;
 		gap_e = -1;
 		// Scoring matrix for duplications should be adjusted by variation/mismatch rate
+		min_unit_size = 5;
 		tr_mat_score = 2;
 		tr_mis_pen = -3;
 		tr_gap_o = -3;
 		tr_gap_e = -1;
 		open_tr_pen = -2;
 		close_tr_pen = -6;
+		del_dup = -5;
 		vis_fn = nullptr;
 	}
 };
@@ -85,7 +84,7 @@ struct DpCell {
 };
 
 struct RepUnit {
-	int tb, te;
+	int tb, te; // 1-based
 	int qb, qe; // [qb, qe) is a tandem repeat of [tb, te)
 	int score; // Alignment score
 	int match, mis, gap;
@@ -99,7 +98,7 @@ struct RepUnit {
 };
 
 // Stage 1: identify breakpoints of tandem repeats using self alignment
-vector<RepUnit> self_alignment(const TrdpOptions &o, int n, const char *seq)
+vector<RepUnit> self_alignment(const ZigOptions &o, int n, const char *seq)
 {
 	double ctime = cputime();
 	const int MAT_SCORE = o.mat_score;
@@ -114,6 +113,7 @@ vector<RepUnit> self_alignment(const TrdpOptions &o, int n, const char *seq)
 	const int TR_GAP_O = o.tr_gap_o;
 	const int TR_GAP_E = o.tr_gap_e;
 
+	// TODO: reduce memory consumption
 	vector<vector<DpCell>> dp;
 	dp.resize(n + 1);
 	for (int i = 0; i <= n; i++) {
@@ -171,7 +171,7 @@ vector<RepUnit> self_alignment(const TrdpOptions &o, int n, const char *seq)
 				// Only start new copy after the end of duplication to prevent illegal path
 				if (dp[i-1][j].D_end == j and dp[i-1][j].dh > max_value) { // If multiple maximums exist, choose the first one
 					max_value = dp[i-1][j].dh;
-					D_beg = dp[i - 1][j].D_beg;
+					D_beg = dp[i-1][j].D_beg;
 					D_end = j;
 					event = NEW_COPY;
 				}
@@ -187,7 +187,7 @@ vector<RepUnit> self_alignment(const TrdpOptions &o, int n, const char *seq)
 					dp[i][j].D_end = D_end;
 					dp[i][j].pi = i-1;
 					dp[i][j].pj = D_end;
-					dp[i][j].event = event;
+					dp[i][j].event = START_REP;
 				}
 			} else {
 				assert(D_beg > 0);
@@ -199,7 +199,7 @@ vector<RepUnit> self_alignment(const TrdpOptions &o, int n, const char *seq)
 					dp[i][j].D_end = D_end;
 					dp[i][j].pi = i-1;
 					dp[i][j].pj = D_end;
-					dp[i][j].event = event;
+					dp[i][j].event = NEW_COPY;
 				}
 			}
 		}
@@ -342,308 +342,163 @@ vector<RepUnit> self_alignment(const TrdpOptions &o, int n, const char *seq)
 	return repetitions;
 }
 
-struct DsiCell {
-	int E, F, H;
+struct Dp2Cell {
+	int E, F, D, H;
 	int pi, pj;
-	bool copy;
-	DsiCell() {
-		E = F = H = -INF;
+	Dp2Cell() {
+		E = F = H = D = -INF;
 		pi = pj = -1;
-		copy = false;
 	}
 };
 
-// Align b* (multiple copies of b) to a
-// Both a and b are reversed because the core function calculates in a backward way to reduce time complexity.
-// Return the maximum length of extension in a
-int extend_copies(const TrdpOptions &o, int n, const char *a, int m, const char *b, vector<vector<DsiCell>> &wdp)
+void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 {
-	const int MAT_SCORE = o.mat_score;
-	const int MIS_PEN = o.mis_pen;
-	const int GAP_O = o.gap_o;
-	const int GAP_E = o.gap_e;
-	const int CNV_O = o.cnv_o;
-	const int CNV_E = o.cnv_e;
-
-	wdp[0][0].H = 0;
-	wdp[0][0].E = wdp[0][0].F = -INF;
-	for (int j = 1; j <= m; j++) {
-		wdp[0][j].H = wdp[0][j].F = GAP_O + GAP_E * j;
-		wdp[0][j].E = -INF;
+	string seq1 = input_fasta_seq(fn1);
+	string seq2 = input_fasta_seq(fn2);
+	const int n = seq1.length();
+	const int m = seq2.length();
+	const char *a = seq1.data();
+	const char *b = seq2.data();
+	vector<RepUnit> rep_a = self_alignment(opt, n, a);
+	vector<RepUnit> rep_b = self_alignment(opt, m, b);
+	// Set end positions (exclusive) as break points
+	vector<bool> bp_a(n + 1, false);
+	vector<bool> bp_b(m + 1, false);
+	for (const RepUnit &u : rep_a) {
+		bp_a[u.qe] = true;
+		bp_a[u.te] = true; // It allows the deletion of the second unit
 	}
-	int max_ext = n;
-	// The loop is backward for sequences
-	for (int i = 1; i <= n; i++) {
-		wdp[i][0].E = wdp[i][0].H = GAP_O + GAP_E * i;
-		wdp[i][0].F = -INF;
-		// First pass
-		for (int j = 1; j <= m; j++) {
-			int h2, v2, d2, h3 = -INF, d3 = -INF;
-			h2 = max(wdp[i][j-1].H + GAP_O, wdp[i][j-1].F) + GAP_E;
-			v2 = max(wdp[i-1][j].H + GAP_O, wdp[i-1][j].E) + GAP_E;
-			d2 = wdp[i-1][j-1].H + (a[n-i] == b[m-j] ?MAT_SCORE :MIS_PEN);
-			// A pathway for copy event
-			if (j == 1 and i > 1) {
-				d3 = wdp[i-1][m].H + (a[n-i] == b[m-1] ?MAT_SCORE :MIS_PEN) + CNV_E;
-				// Theoretically, I don't need to consider horizontal transfer after copy event here.
-				// It will be correctly calculated in the second pass.
-				// Besides, consecutive gap after copy event is technically wrong.
-				// TODO: check if it would change the result
-				// h3 = (wdp[i-1][m].H + GAP_O, wdp[i-1][m].F) + GAP_E + COPY_PEN;
-			}
-			wdp[i][j].F = h2;
-			wdp[i][j].E = v2;
-			wdp[i][j].H = -INF;
-			if (h2 > wdp[i][j].H) {
-				wdp[i][j].H = h2;
-				wdp[i][j].pi = i;
-				wdp[i][j].pj = j - 1;
-			}
-			if (v2 > wdp[i][j].H) {
-				wdp[i][j].H = v2;
-				wdp[i][j].pi = i - 1;
-				wdp[i][j].pj = j;
-			}
-			if (d2 > wdp[i][j].H) {
-				wdp[i][j].H = d2;
-				wdp[i][j].pi = i - 1;
-				wdp[i][j].pj = j - 1;
-			}
-			if (h3 > wdp[i][j].H) {
-				wdp[i][j].H = h3;
-				wdp[i][j].pi = i - 1;
-				wdp[i][j].pj = m;
-			}
-			if (d3 > wdp[i][j].H) {
-				wdp[i][j].H = d3;
-				wdp[i][j].pi = i - 1;
-				wdp[i][j].pj = m;
-			}
-		}
-		// Second pass for horizontal transfer
-		int x = wdp[i][m].H + GAP_O + CNV_E;
-		int pj = m, max_val = -INF;
-		for (int j = 1; j <= m; j++) {
-			int h2 = x + GAP_E * j;
-			if (h2 > wdp[i][j].H) {
-				wdp[i][j].H = h2;
-				wdp[i][j].pi = i;
-				wdp[i][j].pj = pj;
-			}
-			pj = j - 1;
-			max_val = max(max_val, wdp[i][j].H);
-		}
-		if (max_val < 0) {
-			max_ext = i;
-			break;
-		}
+	for (int i = 0; i < n; i++) {
+		if (bp_a[i+1]) fprintf(stderr, "|");
+		fprintf(stderr, "%c", a[i]);
 	}
-	return max_ext;
-}
+	fprintf(stderr, "\n");
+	for (const RepUnit &u : rep_b) {
+		bp_b[u.qe] = true;
+		bp_b[u.te] = true;
+	}
+	for (int i = 0; i < m; i++) {
+		if (bp_b[i+1]) fprintf(stderr, "|");
+		fprintf(stderr, "%c", b[i]);
+	}
+	fprintf(stderr, "\n");
+	int sum1 = accumulate(bp_a.begin(), bp_a.end(), 0);
+	int sum2 = accumulate(bp_b.begin(), bp_b.end(), 0);
+	fprintf(stderr, "Identified %d and %d break points in two sequences\n", sum1, sum2);
 
-// Stage 2: find copy events around break points
-void trdp_core(const TrdpOptions &o, int n, const char *a, const vector<bool> &pa,
-               int m, const char *b, const vector<bool> &pb)
-{
-	double ctime = cputime();
-	const int MAT_SCORE = o.mat_score;
-	const int MIS_PEN = o.mis_pen;
-	const int GAP_O = o.gap_o;
-	const int GAP_E = o.gap_e;
-	const int CNV_O = o.cnv_o;
-	const int CNV_E = o.cnv_e;
-
-	vector<vector<DsiCell>> dp;
-	vector<vector<DsiCell>> wdp;
+	const int MAT_SCORE = opt.mat_score;
+	const int MIS_PEN = opt.mis_pen;
+	const int GAP_O = opt.gap_o;
+	const int GAP_E = opt.gap_e;
+	const int DEL_DUP = opt.del_dup;
+	vector<vector<Dp2Cell>> dp;
 	dp.resize(n + 1);
 	for (int i = 0; i <= n; i++) {
 		dp[i].resize(m + 1);
 	}
 	dp[0][0].H = 0;
 	for (int j = 1; j <= m; j++) {
-		dp[0][j].H = dp[0][j].F = GAP_O + GAP_E * j;
+		dp[0][j].F = dp[0][j].H = GAP_O + j * GAP_E;
 	}
-	int wn = max(n, m);
-	wdp.resize(wn + 1);
-	for (int i = 0; i <= wn; i++) {
-		wdp[i].resize(wn + 1);
-	}
-
-	int last_pa = -1;
+	int last_row = -1;
 	for (int i = 1; i <= n; i++) {
-		dp[i][0].E = dp[i][0].H = GAP_O + GAP_E * i;
-		int last_pb = -1;
+		dp[i][0].E = dp[i][0].H = GAP_O + i * GAP_E;
+		int last_col = -1;
 		for (int j = 1; j <= m; j++) {
-			int h = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
-			int v = max(dp[i-1][j].H + GAP_O, dp[i-1][j].E) + GAP_E;
-			int d = dp[i-1][j-1].H + (a[i-1] == b[j-1] ?MAT_SCORE :MIS_PEN);
-			dp[i][j].E = v;
-			dp[i][j].F = h;
-			dp[i][j].H = h;
-			dp[i][j].pi = i;
-			dp[i][j].pj = j-1;
-			if (v > dp[i][j].H) {
-				dp[i][j].H = v;
+			dp[i][j].E = max(dp[i-1][j].H + GAP_O, dp[i-1][j].E) + GAP_E;
+			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
+			int M = dp[i-1][j-1].H + (a[i-1] == b[j-1] ? MAT_SCORE : MIS_PEN);
+			if (dp[i][j].E > dp[i][j].H) {
+				dp[i][j].H = dp[i][j].E;
 				dp[i][j].pi = i-1;
 				dp[i][j].pj = j;
 			}
-			if (d > dp[i][j].H) {
-				dp[i][j].H = d;
+			if (dp[i][j].F > dp[i][j].H) {
+				dp[i][j].H = dp[i][j].F;
+				dp[i][j].pi = i;
+				dp[i][j].pj = j-1;
+			}
+			if (M > dp[i][j].H) {
+				dp[i][j].H = M;
 				dp[i][j].pi = i-1;
 				dp[i][j].pj = j-1;
 			}
-			// Copy unit between two breakpoints
-			if (pb[j-1] and last_pb != -1) {
-				int n2 = i; // Maximum length of extension
-				int m2 = j - last_pb; // Template length (Usually, _m2_ << _n2_)
-				int max_ext = extend_copies(o, n2, a, m2, b + last_pb, wdp);
-//				if (pa[i-1]) {
-//					for (int i2 = 0; i2 < i; i2++) cout << a[i2]; cout << endl;
-//					for (int j2 = j-m2; j2 < j; j2++) cout << b[j2]; cout << endl;
-//					cout << max_ext << endl;
-//					for (int i2 = 0; i2 <= n2; i2++) {
-//						for (int j2 = 0; j2 <= m2; j2++) {
-//							cout << wdp[i2][j2].H << " ";
-//						}
-//						cout << endl;
-//					}
-//				}
-
-				// Only the last column in WDP matrix is considered, therefore partial copy is not allowed
-				// TODO: support partial match in the last copy
-				int ti = 0, tj = m;
-				for (int k = 1; k < max_ext; k++) {
-					int tmp = dp[i-k][j-m2].H + wdp[k][m2].H + CNV_O;
-					if (tmp > dp[i][j].H) {
-						ti = k;
-						dp[i][j].H = tmp;
-						dp[i][j].copy = true;
-						dp[i][j].pi = i - k;
-						dp[i][j].pj = j - m2;
-					}
+			// New path between two break points
+			if (bp_b[j] and last_col != -1) {
+				int D = dp[i][last_col].H + DEL_DUP;
+				if (D > dp[i][j].H) {
+					dp[i][j].H = D;
+					dp[i][j].pi = i;
+					dp[i][j].pj = last_col;
 				}
 			}
-			if (pb[j-1]) last_pb = j;
-		}
+			if (bp_b[j]) last_col = j - 1;
 
-		if (pa[i-1] and last_pa != -1) {
-			for (int j = 1; j <= m; j++) {
-				// Symmetric to breakpoints on B
-				int n2 = j, m2 = i - last_pa;
-				int max_ext = extend_copies(o, n2, b, m2, a + last_pa, wdp);
-				for (int k = 1; k < max_ext; k++) {
-					int tmp = dp[i-m2][j-k].H + wdp[k][m2].H + CNV_O;
-					if (tmp > dp[i][j].H) {
-						dp[i][j].H = tmp;
-						dp[i][j].copy = true;
-						dp[i][j].pi = i - m2;
-						dp[i][j].pj = j - k;
-					}
+			if (bp_a[i] and last_row != -1) {
+				int D = dp[last_row][j].H + DEL_DUP;
+				if (D > dp[i][j].H) {
+					dp[i][j].H = D;
+					dp[i][j].pi = last_row;
+					dp[i][j].pj = j;
 				}
-
 			}
 		}
-		if (pa[i-1]) last_pa = i;
+		if (bp_a[i]) last_row = i - 1;
 	}
-	fprintf(stderr, "DP score=%d\n", dp[n][m].H);
 
-	// Backtrace for CIGAR
 	int ti = n, tj = m;
+	int del_n = 0, ins_n = 0, mat_n = 0, mis_n = 0, dup_n = 0;
 	string ext_a, ext_b;
 	while (ti > 0 and tj > 0) {
-		const DsiCell &c = dp[ti][tj];
-		if (c.copy) {
-			fprintf(stderr, "COPY (%d,%d) -> (%d,%d)\n", c.pi, c.pj, ti, tj);
-			for (int j = tj; j > c.pj; j--) {
-				ext_b += b[j-1];
-			}
-			for (int i = ti; i > c.pi; i--) {
-				ext_a += a[i-1];
-			}
-			// Copy number > 1; otherwise DSI score must be lower than classical SW
-			int gap = (ti - c.pi) - (tj - c.pj);
-			// TODO: retrieve the sub-matrix of WDP
-			for (int j = 0; j < gap; j++) {
-				ext_b += '#';
-			}
-			for (int j = gap; j < 0; j++) {
-				ext_a += '#';
-			}
+		const Dp2Cell &t = dp[ti][tj];
+		if (t.pi == ti - 1 and t.pj == tj) {
+			del_n++;
+			ext_a += a[ti-1];
+			ext_b += '-';
+		} else if (t.pi == ti and t.pj == tj - 1) {
+			ins_n++;
+			ext_a += '-';
+			ext_b += b[tj-1];
+		} else if (t.pi == ti - 1 and t.pj == tj - 1) {
+			if (a[ti-1] == b[tj-1]) mat_n++;
+			else mis_n++;
+			ext_a += a[ti-1];
+			ext_b += b[tj-1];
 		} else {
-//			fprintf(stderr, "Backtrace (%d,%d) -> (%d,%d)\n", c.pi, c.pj, ti, tj);
-			if (c.pi == ti and c.pj == tj-1) {
-				ext_a += '-';
-				ext_b += b[tj-1];
-			} else if (c.pi == ti-1 and c.pj == tj) {
-				ext_a += a[ti-1];
-				ext_b += '-';
+//			fprintf(stderr, "%d %d -> %d %d\n", ti, tj, t.pi, t.pj);
+			if (ti == t.pi) {
+				for (int i = tj-1; i >= t.pj+1; i--) {
+					ext_a += '+';
+					ext_b += b[i-1];
+				}
 			} else {
-				ext_a += a[ti-1];
-				ext_b += b[tj-1];
+				for (int i = ti-1; i >= t.pi+1; i--) {
+					ext_a += a[i-1];
+					ext_b += '+';
+				}
 			}
+			dup_n++;
 		}
-		ti = c.pi;
-		tj = c.pj;
+		ti = t.pi;
+		tj = t.pj;
 	}
-	while (ti > 0) {
-		ext_a += a[ti-1];
-		ext_b += '-';
-		ti--;
-	}
-	while (tj > 0) {
-		ext_a += '-';
-		ext_b += b[tj-1];
-		tj--;
-	}
+	if (ti > 0) del_n += ti;
+	if (tj > 0) ins_n += tj;
+	fprintf(stderr, "%d deletions, %d insertions, %d mismatches and %d duplications\n", del_n, ins_n, mis_n, dup_n);
 	reverse(ext_a.begin(), ext_a.end());
 	reverse(ext_b.begin(), ext_b.end());
 	fprintf(stderr, "%s\n", ext_a.data());
 	fprintf(stderr, "%s\n", ext_b.data());
 }
 
-void compare_tr_seqs(const TrdpOptions &opt, const char *fn1, const char *fn2) {
-	string seq1 = input_fasta_seq(fn1);
-	string seq2 = input_fasta_seq(fn2);
-	vector<RepUnit> rep1 = self_alignment(opt, seq1.length(), seq1.data());
-	vector<RepUnit> rep2 = self_alignment(opt, seq2.length(), seq2.data());
-	// Set end positions as break points
-	vector<bool> bp1(seq1.length(), false);
-	vector<bool> bp2(seq2.length(), false);
-	for (const RepUnit &u : rep1) {
-		bp1[u.qe] = true;
-		bp1[u.te] = true;
-	}
-	for (const RepUnit &u : rep2) {
-		bp2[u.qe] = true;
-		bp2[u.te] = true;
-	}
-	int sum1 = accumulate(bp1.begin(), bp1.end(), 0);
-	int sum2 = accumulate(bp2.begin(), bp2.end(), 0);
-	fprintf(stderr, "Identified %d and %d break points in two sequences\n", sum1, sum2);
-	for (int i = 0; i < seq1.length(); i++) {
-		fprintf(stderr, "%c", seq1[i]);
-		if (bp1[i]) fprintf(stderr, "*");
-	}
-	fprintf(stderr, "\n");
-	for (int i = 0; i < seq2.length(); i++) {
-		fprintf(stderr, "%c", seq2[i]);
-		if (bp2[i]) fprintf(stderr, "*");
-	}
-	fprintf(stderr, "\n");
-
-	// DSI alignment model of Gary Benson(1997)
-	trdp_core(opt, seq1.length(), seq1.data(), bp1, seq2.length(), seq2.data(), bp2);
-}
-
-int usage(const TrdpOptions &o) {
-	fprintf(stderr, "Usage: TRDP [options] seq1.fa seq2.fa\n");
-	fprintf(stderr, "  Scoring options for alignment of two sequences:\n");
+int usage(const ZigOptions &o) {
+	fprintf(stderr, "Usage: zigalign [options] seq1.fa seq2.fa\n");
+	fprintf(stderr, "  Regular Scoring options:\n");
 	fprintf(stderr, "    -A [INT]  match score [%d]\n", o.mat_score);
 	fprintf(stderr, "    -B [INT]  mismatch penalty [%d]\n", o.mis_pen);
 	fprintf(stderr, "    -O [INT]  open gap(indel) penalty [%d]\n", o.gap_o);
 	fprintf(stderr, "    -E [INT]  extend gap penalty [%d]\n", o.gap_e);
-	fprintf(stderr, "    -V [INT]  open copy-number variation penalty [%d]\n", o.cnv_o);
-	fprintf(stderr, "    -C [INT]  extend copy penalty [%d]\n", o.cnv_e);
+	fprintf(stderr, "    -D [INT]  delete duplication penalty [%d]\n", o.del_dup);
 	fprintf(stderr, "  Scoring options for self-alignment:\n");
 	fprintf(stderr, "    -u [INT]  minimum repeat unit size [%d]\n", o.min_unit_size);
 	fprintf(stderr, "    -d [INT]  open tandem repeat penalty [%d]\n", o.open_tr_pen);
@@ -659,11 +514,11 @@ int usage(const TrdpOptions &o) {
 
 int main(int argc, char *argv[]) {
 	double ctime = cputime(), rtime = realtime();
-	TrdpOptions opt;
+	ZigOptions opt;
 	if (argc == 1) return usage(opt);
 	int c;
 	bool test_stage1 = false;
-	while ((c = getopt(argc, argv, "A:B:O:E:V:C:u:d:p:a:b:o:e:v:1")) >= 0) {
+	while ((c = getopt(argc, argv, "A:B:O:E:D:u:d:p:a:b:o:e:v:")) >= 0) {
 		switch (c) {
 			case 'A':
 				opt.mat_score = abs(str2int(optarg));
@@ -677,11 +532,8 @@ int main(int argc, char *argv[]) {
 			case 'E':
 				opt.gap_e = -abs(str2int(optarg));
 				break;
-			case 'V':
-				opt.cnv_o = -abs(str2int(optarg));
-				break;
-			case 'C':
-				opt.cnv_e = -abs(str2int(optarg));
+			case 'D':
+				opt.del_dup = -abs(str2int(optarg));
 				break;
 			case 'u':
 				opt.min_unit_size = abs(str2int(optarg));
@@ -707,27 +559,14 @@ int main(int argc, char *argv[]) {
 			case 'v':
 				opt.vis_fn = optarg;
 				break;
-			case '1':
-				test_stage1 = true;
-				break;
 			default:
 				fprintf(stderr, "Unrecognized option `%c`\n", c);
 				return 1;
 		}
 	}
 
-	if (test_stage1) {
-		const char *fn = argv[optind];
-		int id = str2int(argv[optind + 1]);
-		TestEntity te = input_csv_test_seq(id, fn);
-		fprintf(stdout, "seq_len=%ld, motif_len=%ld, period=%d, mutation=%d, flank=(%d,%d)\n",
-		        te.seq.length(), te.motif.length(), te.period, te.mutation, te.flank_l, te.flank_r);
-		self_alignment(opt, te.seq.length(), te.seq.c_str());
-		return 0;
-	}
-
 	if (argc - optind == 2) {
-		compare_tr_seqs(opt, argv[optind], argv[optind+1]);
+		align_with_dups(opt, argv[optind], argv[optind+1]);
 	} else {
 		fprintf(stderr, "Two FASTA files are required\n");
 		return 1;
