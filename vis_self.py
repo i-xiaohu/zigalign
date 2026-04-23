@@ -2,10 +2,18 @@ import sys
 import matplotlib.pyplot as plt
 
 
-def visualize(test_id: int):
+# Input: backtrace txt file
+# Output: figure png file
+def visualize(bt_fn):
     points = []
+    # colors annotation:
+    # 0, green: non-repeat
+    # 1, red: start repeat (D transfer)
+    # 2, red: copy event
+    # 3, blue: within repeat
+    # 4, orange: close repeat (B transfer)
     color_list = ['green', 'red', 'red', 'blue', 'orange']
-    with open('self_%d.txt' % test_id, 'r') as f:
+    with open(bt_fn, 'r') as f:
         for line in f:
             x, y, c = line.strip().split()
             x, y, c = int(x), int(y), int(c)
@@ -20,7 +28,6 @@ def visualize(test_id: int):
     ax.xaxis.set_label_position('top')
     ax.grid(True, color='gray', linestyle='-', alpha=0.3)
     ax.set_axisbelow(True)
-    plt.title('Case %d' % (test_id-1), fontsize=14, pad=30)
 
     lx, ly, lc = points[0]
     for (x, y, c) in points[1:]:
@@ -29,12 +36,17 @@ def visualize(test_id: int):
 
     plt.plot([0, 0], [0, 0], color='green', label='non-rep')
     plt.plot([0, 0], [0, 0], color='red', label='D transfer')
-    plt.plot([0, 0], [0, 0], color='blue', label='copy')
+    plt.plot([0, 0], [0, 0], color='blue', label='within-rep')
     plt.plot([0, 0], [0, 0], color='orange', label='B transfer')
     plt.legend()
 
-    plt.savefig('self_%d.png' % test_id)
+    fig_fn = bt_fn.rstrip(".txt") + ".png"
+    plt.savefig(fig_fn)
 
 
 if __name__ == '__main__':
-    visualize(int(sys.argv[1]))
+    if len(sys.argv) != 2:
+        sys.stderr.write('Usage: python self_vis.py <prefix.txt>\n')
+        sys.stderr.write('Visualized figure is stored as prefix.png\n')
+    else:
+        visualize(sys.argv[1])
