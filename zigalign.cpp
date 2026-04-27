@@ -496,17 +496,67 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 	}
 	if (ti > 0) del_n += ti;
 	if (tj > 0) ins_n += tj;
-	fprintf(stderr, "%d deletions, %d insertions, %d mismatches and %d duplications\n", del_n, ins_n, mis_n, dup_n);
+	fprintf(stderr, "%d deletions, %d insertions, %d mismatches and %d duplication deletions\n", del_n, ins_n, mis_n, dup_n);
 	reverse(ext_a.begin(), ext_a.end());
 	reverse(ext_b.begin(), ext_b.end());
-	fprintf(stderr, "%s\n", ext_a.data());
-	fprintf(stderr, "%s\n", ext_b.data());
+	if (DEBUG) {
+		fprintf(stderr, "%s\n", ext_a.data());
+		fprintf(stderr, "%s\n", ext_b.data());
+	}
 
 	if (opt.vis_prefix) {
 		string pair_vis_fn = string(opt.vis_prefix) + "_p.txt";
 		ofstream out(pair_vis_fn);
 		assert(out.is_open());
-
+		ti = n; tj = m;
+		int last_type = -1;
+		const int TYPE_DEL = 0;
+		const int TYPE_INS = 1;
+		const int TYPE_MAT = 2;
+		const int TYPE_DUP = 3;
+		while (ti > 0 and tj > 0) {
+			const Dp2Cell &t = dp[ti][tj];
+			int type;
+			if (t.pi == ti - 1 and t.pj == tj) {
+				del_n++;
+				ext_a += a[ti-1];
+				ext_b += '-';
+				type = TYPE_DEL;
+			} else if (t.pi == ti and t.pj == tj - 1) {
+				ins_n++;
+				ext_a += '-';
+				ext_b += b[tj-1];
+				type = TYPE_INS;
+			} else if (t.pi == ti - 1 and t.pj == tj - 1) {
+				if (a[ti-1] == b[tj-1]) mat_n++;
+				else mis_n++;
+				ext_a += a[ti-1];
+				ext_b += b[tj-1];
+				type = TYPE_MAT;
+			} else {
+//			fprintf(stderr, "%d %d -> %d %d\n", ti, tj, t.pi, t.pj);
+				if (ti == t.pi) {
+					for (int i = tj-1; i >= t.pj+1; i--) {
+						ext_a += '+';
+						ext_b += b[i-1];
+					}
+				} else {
+					for (int i = ti-1; i >= t.pi+1; i--) {
+						ext_a += a[i-1];
+						ext_b += '+';
+					}
+				}
+				dup_n++;
+				type = TYPE_DUP;
+			}
+			if (type != last_type) {
+				out << ti << "\t" << tj << "\t" << type << endl;
+				last_type = type;
+			}
+			ti = t.pi;
+			tj = t.pj;
+		}
+		out << ti << "\t" << tj << "\t" << last_type << endl;
 		out.close();
 	}
 }
