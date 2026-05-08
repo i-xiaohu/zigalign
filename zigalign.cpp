@@ -505,6 +505,7 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 	}
 
 	if (opt.vis_prefix) {
+		// TODO: add breakpoints
 		string pair_vis_fn = string(opt.vis_prefix) + "_p.txt";
 		ofstream out(pair_vis_fn);
 		assert(out.is_open());
