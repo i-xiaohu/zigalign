@@ -458,48 +458,102 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 		if (bp_a[i]) last_row = i;
 	}
 
+	// CIGAR generation
 	int ti = n, tj = m;
 	int del_n = 0, ins_n = 0, mat_n = 0, mis_n = 0, dup_n = 0;
 	string ext_a, ext_b;
+	vector<int> cv;
+	// All operations occur on target sequence _a_
+	const int COP_M = 0;
+	const int COP_I = 1;
+	const int COP_D = 2;
+	const int DUP_I = 3;
+	const int DUP_D = 4;
+	const string OP_CHAR = "MIDID";
+	int op_type = -1, last_op = -1, op_cnt = 0;
 	while (ti > 0 and tj > 0) {
 		const Dp2Cell &t = dp[ti][tj];
-		if (t.pi == ti - 1 and t.pj == tj) {
+		if (t.pi == ti - 1 and t.pj == tj) { // Deletion from _a_
+			op_type = COP_D;
+			op_cnt++;
 			del_n++;
 			ext_a += a[ti-1];
 			ext_b += '-';
-		} else if (t.pi == ti and t.pj == tj - 1) {
+		} else if (t.pi == ti and t.pj == tj - 1) { // Insertion into _a_
+			op_type = COP_I;
+			op_cnt++;
 			ins_n++;
 			ext_a += '-';
 			ext_b += b[tj-1];
-		} else if (t.pi == ti - 1 and t.pj == tj - 1) {
+		} else if (t.pi == ti - 1 and t.pj == tj - 1) { // Match/Mismatch
+			op_type = COP_M;
+			op_cnt++;
 			if (a[ti-1] == b[tj-1]) mat_n++;
 			else mis_n++;
 			ext_a += a[ti-1];
 			ext_b += b[tj-1];
 		} else {
+			if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
 //			fprintf(stderr, "%d %d -> %d %d\n", ti, tj, t.pi, t.pj);
-			if (ti == t.pi) {
+			if (ti == t.pi) { // Duplication insertion into _a_
+				op_type = DUP_I;
+				op_cnt = tj - t.pj - 1;
 				for (int i = tj-1; i >= t.pj+1; i--) {
 					ext_a += '+';
 					ext_b += b[i-1];
 				}
-			} else {
+			} else { // Duplication deletion from _a_
+				op_type = DUP_D;
+				op_cnt = ti - t.pi - 1;
 				for (int i = ti-1; i >= t.pi+1; i--) {
 					ext_a += a[i-1];
 					ext_b += '+';
 				}
 			}
+			// TODO: is it necessary to align template unit to copied units?
+			// If so, which unit is the best template?
+			cv.push_back(op_cnt << 4 | op_type); // Do not merge duplication indels
 			dup_n++;
+			op_type = last_op = -1;
+			op_cnt = 0;
 		}
+		// Merge match/mismatch/indels
+		if (last_op != -1 and op_type != last_op) {
+			cv.push_back(op_cnt << 4 | last_op);
+			op_cnt = 0;
+		}
+		last_op = op_type;
 		ti = t.pi;
 		tj = t.pj;
 	}
-	if (ti > 0) del_n += ti;
-	if (tj > 0) ins_n += tj;
+	assert(ti == 0 and tj == 0);
+	if (ti > 0) {
+		if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
+		op_cnt = ti;
+		last_op = COP_D;
+		del_n += ti;
+	}
+	if (tj > 0) {
+		if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
+		op_cnt = tj;
+		last_op = COP_I;
+		ins_n += tj;
+	}
+	if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
+	reverse(cv.begin(), cv.end());
+	for (int x : cv) {
+		// TODO: identify matches between units
+		op_type = x & 15;
+		op_cnt = x >> 4;
+		if (op_type == DUP_D or op_type == DUP_I) fprintf(stdout, "U");
+		fprintf(stdout, "%d%c", op_cnt, OP_CHAR[op_type]);
+	}
+	fprintf(stdout, "\n");
+
 	fprintf(stderr, "%d deletions, %d insertions, %d mismatches and %d duplication deletions\n", del_n, ins_n, mis_n, dup_n);
 	reverse(ext_a.begin(), ext_a.end());
 	reverse(ext_b.begin(), ext_b.end());
-	if (DEBUG) {
+	if (1) {
 		fprintf(stderr, "%s\n", ext_a.data());
 		fprintf(stderr, "%s\n", ext_b.data());
 	}
@@ -571,6 +625,10 @@ int usage(const ZigOptions &o) {
 	fprintf(stderr, "    -E [INT]  extend gap penalty [%d]\n", o.gap_e);
 	fprintf(stderr, "    -J [INT]  open delete duplication penalty [%d]\n", o.del_dup_o);
 	fprintf(stderr, "    -j [INT]  extend delete duplication penalty [%d]\n", o.del_dup_e);
+	fprintf(stderr, "    -v [STR]  output file prefix\n");
+	fprintf(stderr, "              matrix backtrace paths will be written to prefix_s1.txt, prefix_s2.txt and prefix_p.txt\n");
+	fprintf(stderr, "              use vis_self.py to render prefix_s1.txt and prefix_s2.txt\n");
+	fprintf(stderr, "              use vis_pair.py to render prefix_p.txt\n");
 	fprintf(stderr, "  Scoring options for self-alignment:\n");
 	fprintf(stderr, "    -u [INT]  minimum repeat unit size [%d]\n", o.min_unit_size);
 	fprintf(stderr, "    -d [INT]  open tandem repeat penalty [%d]\n", o.open_tr_pen);
