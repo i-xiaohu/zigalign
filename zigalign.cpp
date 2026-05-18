@@ -346,6 +346,53 @@ static vector<RepUnit> self_alignment(const ZigOptions &o, int n, const char *se
 	return repetitions;
 }
 
+void paf_format(const string &q_name, int q_len, const string &t_name, int t_len, const vector<int> &cv)
+{
+	const int COP_M = 0;
+	const int COP_I = 1;
+	const int COP_D = 2;
+	const int DUP_I = 3;
+	const int DUP_D = 4;
+	const string OP_CHAR = "MIDID";
+
+	char strand = '+';
+	int matched_bases = 0, aligned_length = 0;
+	int mapq = 60;
+	string cigar;
+	for (int x : cv) {
+		int op_type = x & 15;
+		int op_cnt = x >> 4;
+		if (op_type == COP_M) matched_bases += op_cnt;
+		aligned_length += op_cnt;
+		// TODO: identify matches between units
+		if (op_type == DUP_D or op_type == DUP_I) cigar += 'U';
+		cigar += to_string(op_cnt);
+		cigar += OP_CHAR[op_type];
+	}
+
+	// CIGAR validation (FIXME)
+	{
+		string bb;
+		int p = 0;
+		for (int x : cv) {
+			int op_type = (x & 15);
+			int op_cnt = (x >> 4);
+			if (op_type == COP_M) {
+				p += op_cnt;
+			} else if (op_type == COP_D) {
+				p += op_cnt;
+			} else if (op_type == DUP_D) {
+				p += op_cnt;
+			}
+		}
+	}
+	fprintf(stdout, "%s\t%d\t%d\t%d\t%c\t", q_name.c_str(), q_len, 0, q_len, strand);
+	fprintf(stdout, "%s\t%d\t%d\t%d\t", t_name.c_str(), t_len, 0, t_len);
+	fprintf(stdout, "%d\t%d\t%d\t", matched_bases, aligned_length, mapq);
+	fprintf(stdout, "NM:i:%d\t", 0); // TODO: calculate NM
+	fprintf(stdout, "cg:Z:%s\n", cigar.c_str());
+}
+
 struct Dp2Cell {
 	int E, F, B1, B2, H;
 	int pi, pj;
@@ -357,8 +404,10 @@ struct Dp2Cell {
 
 void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 {
-	string seq1 = input_fasta_seq(fn1);
-	string seq2 = input_fasta_seq(fn2);
+	pair<string, string> pair_i1 = input_fasta_seq(fn1);
+	pair<string, string> pair_i2 = input_fasta_seq(fn2);
+	string name1 = pair_i1.first, seq1 = pair_i1.second;
+	string name2 = pair_i2.first, seq2 = pair_i2.second;
 	const int n = seq1.length();
 	const int m = seq2.length();
 	const char *a = seq1.data();
@@ -542,41 +591,15 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 	}
 	if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
 	reverse(cv.begin(), cv.end());
-	for (int x : cv) {
-		// TODO: identify matches between units
-		op_type = x & 15;
-		op_cnt = x >> 4;
-		if (op_type == DUP_D or op_type == DUP_I) fprintf(stdout, "U");
-		fprintf(stdout, "%d%c", op_cnt, OP_CHAR[op_type]);
-	}
-	fprintf(stdout, "\n");
-
-	// CIGAR validation (FIXME)
-	{
-		cerr << n << "\t" << m << endl;
-		string bb;
-		int p = 0;
-		for (int x : cv) {
-			op_type = (x & 15);
-			op_cnt = (x >> 4);
-			if (op_type == COP_M) {
-				p += op_cnt;
-			} else if (op_type == COP_D) {
-				p += op_cnt;
-			} else if (op_type == DUP_D) {
-				p += op_cnt;
-			}
-		}
-		cerr << p << endl;
-	}
 
 	fprintf(stderr, "%d deletions, %d insertions, %d mismatches and %d duplication deletions\n", del_n, ins_n, mis_n, dup_n);
 	reverse(ext_a.begin(), ext_a.end());
 	reverse(ext_b.begin(), ext_b.end());
-	if (1) {
+	if (DEBUG) {
 		fprintf(stderr, "%s\n", ext_a.data());
 		fprintf(stderr, "%s\n", ext_b.data());
 	}
+	paf_format(name2, m, name1, n, cv);
 
 	if (opt.vis_prefix) {
 		// TODO: add breakpoints
@@ -637,7 +660,7 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 }
 
 int usage(const ZigOptions &o) {
-	fprintf(stderr, "Usage: zigalign [options] seq1.fa seq2.fa\n");
+	fprintf(stderr, "Usage: zigalign [options] seq1.fa seq2.fa > aln.paf\n");
 	fprintf(stderr, "  Regular Scoring options:\n");
 	fprintf(stderr, "    -A [INT]  match score [%d]\n", o.mat_score);
 	fprintf(stderr, "    -B [INT]  mismatch penalty [%d]\n", o.mis_pen);

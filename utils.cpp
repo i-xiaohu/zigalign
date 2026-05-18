@@ -22,25 +22,31 @@ double realtime()
 	return tp.tv_sec + tp.tv_usec * 1e-6;
 }
 
-string input_fasta_seq(const char *fn)
+pair<string,string> input_fasta_seq(const char *fn)
 {
 	gzFile f = gzopen(fn, "r");
 	assert(f != nullptr);
 	kseq_t *ks = kseq_init(f);
 	// Only process the first sequence
-	string ret;
+	string name, seq;
 	if (kseq_read(ks) >= 0) {
 		fprintf(stderr, "Input sequence %s (length=%ld) from `%s`\n", ks->name.s, ks->seq.l, fn);
-		int len = ks->seq.l;
-		char *seq = ks->seq.s;
-		ret.resize(len);
-		for (int i = 0; i < len; i++) {
-			seq[i] = (char)toupper(seq[i]);
-			if (seq[i] !=  'A' and seq[i] != 'C' and seq[i] != 'G' and seq[i] != 'T') {
-				fprintf(stderr, "Unsupported character `%c`\n", seq[i]);
+		int l = ks->seq.l;
+		char *s = ks->seq.s;
+		seq.resize(l);
+		for (int i = 0; i < l; i++) {
+			seq[i] = (char)toupper(s[i]);
+			if (s[i] !=  'A' and s[i] != 'C' and s[i] != 'G' and s[i] != 'T') {
+				fprintf(stderr, "Unsupported character `%c`\n", s[i]);
 				abort();
 			}
-			ret[i] = seq[i];
+			seq[i] = s[i];
+		}
+		l = ks->name.l;
+		s = ks->name.s;
+		name.resize(l);
+		for (int i = 0; i < l; i++) {
+			name[i] = s[i];
 		}
 	} else {
 		fprintf(stderr, "No sequence found in `%s`\n", fn);
@@ -48,7 +54,7 @@ string input_fasta_seq(const char *fn)
 	}
 	kseq_destroy(ks);
 	gzclose(f);
-	return ret;
+	return make_pair(name, seq);
 }
 
 TestEntity input_csv_test_seq(int n, const char *fn)
