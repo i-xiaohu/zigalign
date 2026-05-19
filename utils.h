@@ -21,7 +21,7 @@ static inline int str2int(const char* s) {
 	return (int)strtol(s, nullptr, 10);
 }
 
-string input_fasta_seq(const char *fn);
+pair<string,string> input_fasta_seq(const char *fn);
 
 struct TestEntity {
 	string motif;
