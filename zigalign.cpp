@@ -12,6 +12,8 @@
 #include <getopt.h>
 #include <algorithm>
 #include <numeric>
+#include <ratio>
+
 #include "utils.h"
 using namespace std;
 
@@ -346,7 +348,7 @@ static vector<RepUnit> self_alignment(const ZigOptions &o, int n, const char *se
 	return repetitions;
 }
 
-void paf_format(const string &q_name, int q_len, const string &t_name, int t_len, const vector<int> &cv)
+void paf_format(const string &q_name, const string &que, const string &t_name, string tar, const vector<int> &cv)
 {
 	const int COP_M = 0;
 	const int COP_I = 1;
@@ -355,41 +357,69 @@ void paf_format(const string &q_name, int q_len, const string &t_name, int t_len
 	const int DUP_D = 4;
 	const string OP_CHAR = "MIDID";
 
+	int q_len = que.length(), t_len = tar.length();
 	char strand = '+';
-	int matched_bases = 0, aligned_length = 0;
+	int matches_n = 0, mismatches_n = 0, extended_length = 0;
 	int mapq = 60;
+	int edit_distance = 0;
+	int ti = 0, qi = 0;
 	string cigar;
 	for (int x : cv) {
-		int op_type = x & 15;
-		int op_cnt = x >> 4;
-		if (op_type == COP_M) matched_bases += op_cnt;
-		aligned_length += op_cnt;
+		int op_type = x & 15, op_cnt = x >> 4;
+		if (op_type == COP_M) {
+			for (int i = 0; i < op_cnt; i++) {
+				if (que[qi + i] == tar[ti + i]) {
+					matches_n++;
+				} else {
+					mismatches_n++;
+					edit_distance++;
+				}
+			}
+			ti += op_cnt;
+			qi += op_cnt;
+		} else if (op_type == COP_I) {
+			qi += op_cnt;
+			edit_distance += op_cnt;
+		} else if (op_type == DUP_I) {
+			qi += op_cnt;
+			edit_distance += 1; // Tandem duplication has an edit distance of 1
+		} else if (op_type == COP_D) {
+			ti += op_cnt;
+			edit_distance += op_cnt;
+		} else {
+			ti += op_cnt;
+			edit_distance += 1; // Tandem deletion has an edit distance of 1
+		}
+		extended_length += op_cnt;
 		// TODO: identify matches between units
 		if (op_type == DUP_D or op_type == DUP_I) cigar += 'U';
 		cigar += to_string(op_cnt);
 		cigar += OP_CHAR[op_type];
 	}
+	assert(ti == t_len and qi == q_len);
 
-	// CIGAR validation (FIXME)
-	{
-		string bb;
-		int p = 0;
+	// CIGAR validation
+	if (DEBUG) {
+		string modified_tar;
+		qi = 0;
 		for (int x : cv) {
-			int op_type = (x & 15);
-			int op_cnt = (x >> 4);
+			int op_type = x & 15, op_cnt = x >> 4;
 			if (op_type == COP_M) {
-				p += op_cnt;
-			} else if (op_type == COP_D) {
-				p += op_cnt;
-			} else if (op_type == DUP_D) {
-				p += op_cnt;
+				for (int i = 0; i < op_cnt; i++) {
+					modified_tar += que[qi++];
+				}
+			} else if (op_type == COP_I or op_type == DUP_I) {
+				for (int i = 0; i < op_cnt; i++) {
+					modified_tar += que[qi++];
+				}
 			}
 		}
+		assert(modified_tar == que);
 	}
 	fprintf(stdout, "%s\t%d\t%d\t%d\t%c\t", q_name.c_str(), q_len, 0, q_len, strand);
 	fprintf(stdout, "%s\t%d\t%d\t%d\t", t_name.c_str(), t_len, 0, t_len);
-	fprintf(stdout, "%d\t%d\t%d\t", matched_bases, aligned_length, mapq);
-	fprintf(stdout, "NM:i:%d\t", 0); // TODO: calculate NM
+	fprintf(stdout, "%d\t%d\t%d\t", matches_n+mismatches_n, extended_length, mapq);
+	fprintf(stdout, "NM:i:%d\t", edit_distance);
 	fprintf(stdout, "cg:Z:%s\n", cigar.c_str());
 }
 
@@ -404,10 +434,10 @@ struct Dp2Cell {
 
 void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 {
-	pair<string, string> pair_i1 = input_fasta_seq(fn1);
-	pair<string, string> pair_i2 = input_fasta_seq(fn2);
-	string name1 = pair_i1.first, seq1 = pair_i1.second;
-	string name2 = pair_i2.first, seq2 = pair_i2.second;
+	pair<string, string> pair1 = input_fasta_seq(fn1);
+	pair<string, string> pair2 = input_fasta_seq(fn2);
+	string name1 = pair1.first, seq1 = pair1.second;
+	string name2 = pair2.first, seq2 = pair2.second;
 	const int n = seq1.length();
 	const int m = seq2.length();
 	const char *a = seq1.data();
@@ -423,12 +453,14 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 	vector<bool> bp_a(n + 1, false);
 	vector<bool> bp_b(m + 1, false);
 	for (const RepUnit &u : rep_a) {
-		bp_a[u.qe-1] = true; // 1-based; open right interval
+		bp_a[u.qe-1] = true; // break points are 1-based open-right interval
 		bp_a[u.te-1] = true; // It allows the deletion of the second unit
+		bp_a[u.tb-1] = true; // It allows the deletion of the first unit
 	}
 	for (const RepUnit &u : rep_b) {
 		bp_b[u.qe-1] = true;
 		bp_b[u.te-1] = true;
+		bp_b[u.tb-1] = true;
 	}
 	if (DEBUG) {
 		for (int i = 0; i < n; i++) {
@@ -524,19 +556,16 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 		const Dp2Cell &t = dp[ti][tj];
 		if (t.pi == ti - 1 and t.pj == tj) { // Deletion from _a_
 			op_type = COP_D;
-			op_cnt++;
 			del_n++;
 			ext_a += a[ti-1];
 			ext_b += '-';
 		} else if (t.pi == ti and t.pj == tj - 1) { // Insertion into _a_
 			op_type = COP_I;
-			op_cnt++;
 			ins_n++;
 			ext_a += '-';
 			ext_b += b[tj-1];
 		} else if (t.pi == ti - 1 and t.pj == tj - 1) { // Match/Mismatch
 			op_type = COP_M;
-			op_cnt++;
 			if (a[ti-1] == b[tj-1]) mat_n++;
 			else mis_n++;
 			ext_a += a[ti-1];
@@ -546,15 +575,15 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 //			fprintf(stderr, "%d %d -> %d %d\n", ti, tj, t.pi, t.pj);
 			if (ti == t.pi) { // Duplication insertion into _a_
 				op_type = DUP_I;
-				op_cnt = tj - t.pj - 1;
-				for (int i = tj-1; i >= t.pj+1; i--) {
+				op_cnt = tj - t.pj;
+				for (int j = tj; j > t.pj; j--) {
 					ext_a += '+';
-					ext_b += b[i-1];
+					ext_b += b[j-1];
 				}
 			} else { // Duplication deletion from _a_
 				op_type = DUP_D;
-				op_cnt = ti - t.pi - 1;
-				for (int i = ti-1; i >= t.pi+1; i--) {
+				op_cnt = ti - t.pi;
+				for (int i = ti; i > t.pi; i--) {
 					ext_a += a[i-1];
 					ext_b += '+';
 				}
@@ -565,7 +594,7 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 			cv.push_back(op_cnt << 4 | op_type); // Do not merge duplication indels
 			dup_n++;
 			op_type = last_op = -1;
-			op_cnt = 0;
+			op_cnt = -1;
 		}
 		// Merge match/mismatch/indels
 		if (last_op != -1 and op_type != last_op) {
@@ -573,33 +602,41 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 			op_cnt = 0;
 		}
 		last_op = op_type;
+		op_cnt++;
 		ti = t.pi;
 		tj = t.pj;
 	}
-	assert(ti == 0 and tj == 0);
+	if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
 	if (ti > 0) {
-		if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
-		op_cnt = ti;
-		last_op = COP_D;
-		del_n += ti;
+		cv.push_back(ti << 4 | COP_D);
 	}
 	if (tj > 0) {
-		if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
-		op_cnt = tj;
-		last_op = COP_I;
-		ins_n += tj;
+		cv.push_back(tj << 4 | COP_I);
 	}
-	if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
 	reverse(cv.begin(), cv.end());
-
-	fprintf(stderr, "%d deletions, %d insertions, %d mismatches and %d duplication deletions\n", del_n, ins_n, mis_n, dup_n);
 	reverse(ext_a.begin(), ext_a.end());
 	reverse(ext_b.begin(), ext_b.end());
+	fprintf(stderr, "%d deletions, %d insertions, %d(%d) matches(mismatches) and %d duplication deletions\n", del_n, ins_n, mat_n, mis_n, dup_n);
 	if (DEBUG) {
 		fprintf(stderr, "%s\n", ext_a.data());
 		fprintf(stderr, "%s\n", ext_b.data());
+		string non_a, non_b;
+		for (char c: ext_a) {
+			if (c != '-' and c != '+') {
+				non_a += c;
+			}
+		}
+		for (char c: ext_b) {
+			if (c != '-' and c != '+') {
+				non_b += c;
+			}
+		}
+		assert(non_a.length() == n);
+		assert(non_a == string(a));
+		assert(non_b.length() == m);
+		assert(non_b == string(b));
 	}
-	paf_format(name2, m, name1, n, cv);
+	paf_format(name2, seq2, name1, seq1, cv);
 
 	if (opt.vis_prefix) {
 		// TODO: add breakpoints
@@ -616,35 +653,12 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 			const Dp2Cell &t = dp[ti][tj];
 			int type;
 			if (t.pi == ti - 1 and t.pj == tj) {
-				del_n++;
-				ext_a += a[ti-1];
-				ext_b += '-';
 				type = TYPE_DEL;
 			} else if (t.pi == ti and t.pj == tj - 1) {
-				ins_n++;
-				ext_a += '-';
-				ext_b += b[tj-1];
 				type = TYPE_INS;
 			} else if (t.pi == ti - 1 and t.pj == tj - 1) {
-				if (a[ti-1] == b[tj-1]) mat_n++;
-				else mis_n++;
-				ext_a += a[ti-1];
-				ext_b += b[tj-1];
 				type = TYPE_MAT;
 			} else {
-//			fprintf(stderr, "%d %d -> %d %d\n", ti, tj, t.pi, t.pj);
-				if (ti == t.pi) {
-					for (int i = tj-1; i >= t.pj+1; i--) {
-						ext_a += '+';
-						ext_b += b[i-1];
-					}
-				} else {
-					for (int i = ti-1; i >= t.pi+1; i--) {
-						ext_a += a[i-1];
-						ext_b += '+';
-					}
-				}
-				dup_n++;
 				type = TYPE_DUP;
 			}
 			if (type != last_type) {
