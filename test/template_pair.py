@@ -53,8 +53,8 @@ def work(prefix: str):
         t = add_mutation(template, 0.05)
         all_units.append(t)
     # Generate two different sets of units to delete
-    deleted1 = random.sample(range(0, copy_n+1), delete_n)
-    deleted2 = random.sample(range(0, copy_n+1), delete_n)
+    deleted1 = sorted(random.sample(range(0, copy_n+1), delete_n))
+    deleted2 = sorted(random.sample(range(0, copy_n+1), delete_n))
     print('Seq1 deletes', deleted1)
     print('Seq2 deletes', deleted2)
     units1, units2 = [], []

@@ -1,0 +1,11 @@
+Seq1 deletes [1, 3, 20, 30, 29, 13, 0, 21, 9, 27]
+Seq2 deletes [12, 6, 3, 22, 0, 5, 21, 24, 13, 29]
+Seq1 deleted 1
+Seq2 deleted 5
+Seq2 deleted 6
+Seq1 deleted 9
+Seq2 deleted 12
+Seq1 deleted 20
+Seq2 deleted 22
+Seq2 deleted 24
+Seq1 deleted 27
