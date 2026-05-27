@@ -449,7 +449,7 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 	}
 	vector<RepUnit> rep_a = self_alignment(opt, n, a, vis_self_fn1);
 	vector<RepUnit> rep_b = self_alignment(opt, m, b, vis_self_fn2);
-	// Set end positions (exclusive) as break points
+	// Set break points
 	vector<bool> bp_a(n + 1, false);
 	vector<bool> bp_b(m + 1, false);
 	for (const RepUnit &u : rep_a) {
@@ -462,6 +462,19 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 		bp_b[u.te-1] = true;
 		bp_b[u.tb-1] = true;
 	}
+	// Smooth out breakpoints (repeats units from last steps have not been normalized)
+	const int BP_MIN_DIS = 3;
+	for (int i = n; i >= BP_MIN_DIS; i--) {
+		if (bp_a[i]) {
+			bp_a[i-1] = bp_a[i-2] = bp_a[i-3] = false;
+		}
+	}
+	for (int i = m; i >= BP_MIN_DIS; i--) {
+		if (bp_b[i]) {
+			bp_b[i-1] = bp_b[i-2] = bp_b[i-3] = false;
+		}
+	}
+
 	if (DEBUG) {
 		for (int i = 0; i < n; i++) {
 			if (bp_a[i+1]) fprintf(stderr, "|");
@@ -639,10 +652,26 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 	paf_format(name2, seq2, name1, seq1, cv);
 
 	if (opt.vis_prefix) {
-		// TODO: add breakpoints
 		string pair_vis_fn = string(opt.vis_prefix) + "_p.txt";
 		ofstream out(pair_vis_fn);
 		assert(out.is_open());
+		// Meta information and breakpoints
+		out << "Seq1 length: " << n << ", Seq2 length: " << m << endl;
+		out << "Breakpoints1:" << endl;
+		for (int i = 1; i <= n; i++) {
+			if (bp_a[i]) {
+				out << i << " ";
+			}
+		}
+		out << endl;
+		out << "Breakpoints2:" << endl;
+		for (int i = 1; i <= m; i++) {
+			if (bp_b[i]) {
+				out << i << " ";
+			}
+		}
+		out << endl;
+
 		ti = n; tj = m;
 		int last_type = -1;
 		const int TYPE_DEL = 0;
@@ -661,10 +690,11 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 			} else {
 				type = TYPE_DUP;
 			}
-			if (type != last_type) {
+			// Do not merge tandem duplications
+			if (type != last_type or type == TYPE_DUP) {
 				out << ti << "\t" << tj << "\t" << type << endl;
-				last_type = type;
 			}
+			last_type = type;
 			ti = t.pi;
 			tj = t.pj;
 		}
