@@ -37,6 +37,8 @@ struct ZigOptions {
 	// Penalty for deleting duplications
 	int del_dup_o;
 	int del_dup_e;
+	// K-band size
+	int band_width;
 	// Visualization
 	const char *vis_prefix;
 
@@ -56,6 +58,7 @@ struct ZigOptions {
 		close_tr_pen = -6;
 		del_dup_o = -6;
 		del_dup_e = -2;
+		band_width = 300;
 		vis_prefix = nullptr;
 	}
 };
@@ -101,8 +104,17 @@ struct RepUnit {
 	}
 };
 
+struct Interval {
+	int l, r; // [l, r)
+};
+
+struct TandemRepeat {
+	Interval temp; // Templates
+	vector<Interval> units;
+};
+
 // Stage 1: identify breakpoints of tandem repeats using self alignment
-static vector<RepUnit> self_alignment(const ZigOptions &o, int n, const char *seq, const string &vis_fn)
+static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, const string &vis_fn)
 {
 	double ctime = cputime();
 	const int MAT_SCORE = o.mat_score;
@@ -222,7 +234,7 @@ static vector<RepUnit> self_alignment(const ZigOptions &o, int n, const char *se
 				d_score = max(dp[i-1][j-1].D_gate, dp[i-1][j-1].dh) + tmp;
 			}
 
-			// Here, >= prefers another copy instead of a new copy; it can generate longer tandem repeats
+			// Here, >= prefers continue an existing copy, so it can generate longer tandem repeats
 			if (v_score >= dp[i][j].D_gate and v_score > dp[i][j].dh) {
 				dp[i][j].dh = v_score;
 				dp[i][j].D_beg = dp[i - 1][j].D_beg;
@@ -284,19 +296,20 @@ static vector<RepUnit> self_alignment(const ZigOptions &o, int n, const char *se
 		out.close();
 	}
 
-	// Trace back the optimal path
+	// Trace back the optimal path to find tandem repeats
 	int ti = n, tj = n;
-	vector<RepUnit> repetitions;
+	vector<TandemRepeat> tr_array;
 	while (ti > 0 and tj > 0) {
 		Dp1Cell &t = dp[ti][tj];
 		if (t.event == END_REP) {
 			assert(ti == tj); // Only main diagonal closes repetitions
-			if (DEBUG) fprintf(stderr, "Close: %d -> %d (Diagonal)\n", t.pj, ti);
-
+			TandemRepeat group;
 			while (t.event != START_REP) {
 				ti = t.pi;
 				tj = t.pj;
 				t = dp[ti][tj]; // Lower-right corner of the sub-matrix
+				Interval intv;
+				intv.r = ti + 1;
 				RepUnit u;
 				u.score = t.dh;
 				u.qe = ti + 1;
@@ -316,6 +329,8 @@ static vector<RepUnit> self_alignment(const ZigOptions &o, int n, const char *se
 				u.score -= dp[ti][tj].D_gate;
 				u.qb = ti;
 				u.tb = tj;
+				intv.l = ti;
+				group.units.push_back(intv);
 				if (seq[ti - 1] == seq[tj - 1]) {
 					u.match++;
 					u.score += o.tr_mat_score;
@@ -323,29 +338,82 @@ static vector<RepUnit> self_alignment(const ZigOptions &o, int n, const char *se
 					u.mis++;
 					u.score += o.tr_mis_pen;
 				}
-				repetitions.push_back(u);
-
-				if (t.event == START_REP) {
-					if (DEBUG) fprintf(stderr, "Open: %d (Diagonal) -> %d, unit_size=%d\n", tj, t.pj, t.pj - tj + 1);
-				} else if (t.event == NEW_COPY) {
-					if (DEBUG) fprintf(stderr, "Copy: %d (i=%d) -> %d, unit_size=%d\n", tj, ti, t.pj, t.pj - tj + 1);
-				}
 			}
+			group.temp.l = tj;
+			group.temp.r = ti;
+			reverse(group.units.begin(), group.units.end());
+			tr_array.push_back(group);
 		}
 		ti = t.pi;
 		tj = t.pj;
 	}
-
-	reverse(repetitions.begin(), repetitions.end());
-	fprintf(stderr, "Self-alignment found %ld duplications in %.3f CPU seconds\n", repetitions.size(), cputime() - ctime);
+	reverse(tr_array.begin(), tr_array.end());
 	if (DEBUG) {
-		for (int i = 0; i < repetitions.size(); i++) {
-			const RepUnit &u = repetitions[i];
-			fprintf(stdout, "[%d] Tandem repeat between [%d,%d) and [%d,%d), score=%d (matches=%d, mismatches=%d, gaps=%d)\n",
-			        i+1, u.qb, u.qe, u.tb, u.te, u.score, u.match, u.mis, u.gap);
+		fprintf(stdout, "Before Normalization\n");
+		for (const TandemRepeat &group: tr_array) {
+			fprintf(stdout, "Template: [%d, %d), Units:", group.temp.l, group.temp.r);
+			for (const Interval &intv: group.units) {
+				fprintf(stdout, " [%d, %d)", intv.l, intv.r);
+			}
+			fprintf(stdout, "\n");
 		}
 	}
-	return repetitions;
+	// Normalize repeat groups
+	int new_size = 0;
+	for (int i = 0; i < tr_array.size(); ) {
+		TandemRepeat &tr = tr_array[i];
+		int range_r = tr.units.back().r;
+		int next = tr_array.size();
+		for (int j = i + 1; j < tr_array.size(); j++) {
+			int l = tr_array[j].temp.l;
+			int r = tr_array[j].temp.r;
+			int len = r - l;
+			int overlap = max(range_r - l, 0);
+			if (overlap > 0.9 * len) {
+				// Merge into previous group
+				for (const Interval &intv: tr_array[j].units) {
+					tr.units.push_back(intv);
+				}
+				range_r = tr.units.back().r;
+			} else {
+				next = j;
+				break;
+			}
+		}
+		tr_array[new_size++] = tr;
+		i = next;
+	}
+	tr_array.resize(new_size);
+	if (DEBUG) {
+		fprintf(stdout, "After Normalization\n");
+		for (const TandemRepeat &group: tr_array) {
+			fprintf(stdout, "Template: [%d, %d), Units:", group.temp.l, group.temp.r);
+			for (const Interval &intv: group.units) {
+				fprintf(stdout, " [%d, %d)", intv.l, intv.r);
+			}
+			fprintf(stdout, "\n");
+		}
+	}
+
+	// Collect breakpoints
+	vector<int> ret;
+	for (const TandemRepeat &group: tr_array) {
+		ret.push_back(group.temp.l-1);
+		ret.push_back(group.temp.r-1);
+		for (int i = 1; i < group.units.size(); i++) {
+			ret.push_back(group.units[i].r-1);
+		}
+	}
+	if (DEBUG) {
+		fprintf(stdout, "Breakpoints:\n");
+		for (int i : ret) {
+			fprintf(stdout, " %d", i);
+		}
+		fprintf(stdout, "\n");
+	}
+
+	fprintf(stderr, "Self-alignment identified %ld breakpoints in %.3f CPU seconds\n", ret.size(), cputime() - ctime);
+	return ret;
 }
 
 void paf_format(const string &q_name, const string &que, const string &t_name, string tar, const vector<int> &cv)
@@ -447,33 +515,13 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 		vis_self_fn1 = string(opt.vis_prefix) + "_s1.txt";
 		vis_self_fn2 = string(opt.vis_prefix) + "_s2.txt";
 	}
-	vector<RepUnit> rep_a = self_alignment(opt, n, a, vis_self_fn1);
-	vector<RepUnit> rep_b = self_alignment(opt, m, b, vis_self_fn2);
+	vector<int> rep_a = self_alignment(opt, n, a, vis_self_fn1);
+	vector<int> rep_b = self_alignment(opt, m, b, vis_self_fn2);
 	// Set break points
 	vector<bool> bp_a(n + 1, false);
 	vector<bool> bp_b(m + 1, false);
-	for (const RepUnit &u : rep_a) {
-		bp_a[u.qe-1] = true; // break points are 1-based open-right interval
-		bp_a[u.te-1] = true; // It allows the deletion of the second unit
-		bp_a[u.tb-1] = true; // It allows the deletion of the first unit
-	}
-	for (const RepUnit &u : rep_b) {
-		bp_b[u.qe-1] = true;
-		bp_b[u.te-1] = true;
-		bp_b[u.tb-1] = true;
-	}
-	// Smooth out breakpoints (repeats units from last steps have not been normalized)
-	const int BP_MIN_DIS = 3;
-	for (int i = n; i >= BP_MIN_DIS; i--) {
-		if (bp_a[i]) {
-			bp_a[i-1] = bp_a[i-2] = bp_a[i-3] = false;
-		}
-	}
-	for (int i = m; i >= BP_MIN_DIS; i--) {
-		if (bp_b[i]) {
-			bp_b[i-1] = bp_b[i-2] = bp_b[i-3] = false;
-		}
-	}
+	for (int x: rep_a) bp_a[x] = true;
+	for (int x: rep_b) bp_b[x] = true;
 
 	if (DEBUG) {
 		for (int i = 0; i < n; i++) {
@@ -703,6 +751,19 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 	}
 }
 
+static vector<int> input_break_points(const char *fn)
+{
+	ifstream in(fn);
+	assert(in.is_open());
+	vector<int> ret;
+	int num;
+	while (in >> num) {
+		ret.push_back(num);
+	}
+	in.close();
+	return ret;
+}
+
 int usage(const ZigOptions &o) {
 	fprintf(stderr, "Usage: zigalign [options] seq1.fa seq2.fa > aln.paf\n");
 	fprintf(stderr, "  Regular Scoring options:\n");
@@ -734,7 +795,7 @@ int main(int argc, char *argv[]) {
 	ZigOptions opt;
 	if (argc == 1) return usage(opt);
 	int c;
-	while ((c = getopt(argc, argv, "A:B:O:E:J:j:u:d:p:a:b:o:e:v:")) >= 0) {
+	while ((c = getopt(argc, argv, "A:B:O:E:J:j:u:d:p:a:b:o:e:k:v:")) >= 0) {
 		switch (c) {
 			case 'A':
 				opt.mat_score = abs(str2int(optarg));
@@ -774,6 +835,9 @@ int main(int argc, char *argv[]) {
 				break;
 			case 'e':
 				opt.tr_gap_e = -abs(str2int(optarg));
+				break;
+			case 'k':
+				opt.band_width = abs(str2int(optarg));
 				break;
 			case 'v':
 				opt.vis_prefix = optarg;
