@@ -359,6 +359,7 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 		}
 	}
 	// Normalize repeat groups
+	double MIN_OVERLAP_COEF = 0.5;
 	int new_size = 0;
 	for (int i = 0; i < tr_array.size(); ) {
 		TandemRepeat &tr = tr_array[i];
@@ -369,7 +370,8 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 			int r = tr_array[j].temp.r;
 			int len = r - l;
 			int overlap = max(range_r - l, 0);
-			if (overlap > 0.9 * len) {
+			// FIXME: the merge is unsafe because template might change
+			if (overlap > MIN_OVERLAP_COEF * len) {
 				// Merge into previous group
 				for (const Interval &intv: tr_array[j].units) {
 					tr.units.push_back(intv);
@@ -384,7 +386,7 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 		i = next;
 	}
 	tr_array.resize(new_size);
-	if (DEBUG) {
+	if (1) {
 		fprintf(stdout, "After Normalization\n");
 		for (const TandemRepeat &group: tr_array) {
 			fprintf(stdout, "Template: [%d, %d), Units:", group.temp.l, group.temp.r);
@@ -404,7 +406,11 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 			ret.push_back(group.units[i].r-1);
 		}
 	}
-	if (DEBUG) {
+	// Correct breakpoints must be naturally sorted
+	for (int i = 1; i < ret.size(); i++) {
+		assert(ret[i] > ret[i-1]);
+	}
+	if (1) {
 		fprintf(stdout, "Breakpoints:\n");
 		for (int i : ret) {
 			fprintf(stdout, " %d", i);
