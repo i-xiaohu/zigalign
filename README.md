@@ -36,7 +36,5 @@ Note: self-alignment scoring matrix must reward more and/or
 # Work in progress
 This program is still in development stage. I plan to add these features in future:
 - Reduce memory consumption
-- CIGAR interface
-- Visualization
 - Banded alignment
 - SIMD acceleration

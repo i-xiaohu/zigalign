@@ -410,6 +410,19 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 	for (int i = 1; i < ret.size(); i++) {
 		assert(ret[i] > ret[i-1]);
 	}
+
+	if (ret.empty()) return ret;
+
+	// FIXME: fix bugs of fuzzy breakpoints
+	int new_n = 1, last_num = ret[0];
+	for (int i = 1; i < ret.size(); i++) {
+		if (ret[i] > last_num + 20) {
+			ret[new_n++] = ret[i];
+			last_num = ret[i];
+		}
+	}
+	ret.resize(new_n);
+
 	if (1) {
 		fprintf(stdout, "Breakpoints:\n");
 		for (int i : ret) {
