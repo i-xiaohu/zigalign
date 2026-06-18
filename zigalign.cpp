@@ -400,7 +400,7 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 	for (const TandemRepeat &group: tr_array) {
 		ret.push_back(group.temp.l-1);
 		ret.push_back(group.temp.r-1);
-		for (int i = 1; i < group.units.size(); i++) {
+		for (int i = 0; i < group.units.size(); i++) {
 			ret.push_back(group.units[i].r-1);
 		}
 	}
@@ -515,29 +515,24 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 		vis_self_fn1 = string(opt.vis_prefix) + "_s1.txt";
 		vis_self_fn2 = string(opt.vis_prefix) + "_s2.txt";
 	}
-	vector<int> rep_a = self_alignment(opt, n, a, vis_self_fn1);
-	vector<int> rep_b = self_alignment(opt, m, b, vis_self_fn2);
-	// Set break points
-	vector<bool> bp_a(n + 1, false);
-	vector<bool> bp_b(m + 1, false);
-	for (int x: rep_a) bp_a[x] = true;
-	for (int x: rep_b) bp_b[x] = true;
-
-	if (DEBUG) {
-		for (int i = 0; i < n; i++) {
-			if (bp_a[i+1]) fprintf(stderr, "|");
-			fprintf(stderr, "%c", a[i]);
-		}
-		fprintf(stderr, "\n");
-		for (int i = 0; i < m; i++) {
-			if (bp_b[i+1]) fprintf(stderr, "|");
-			fprintf(stderr, "%c", b[i]);
-		}
-		fprintf(stderr, "\n");
+	vector<int> bp_a = self_alignment(opt, n, a, vis_self_fn1);
+	vector<int> bp_b = self_alignment(opt, m, b, vis_self_fn2);
+	// TODO: Is there a proper way to determine this value?
+	const int BP_FUZZY = 10; // Optimal B-transfer occurs around breakpoints
+	// Set breakpoint fuzzy intervals
+	vector<Interval> bp_intv_a, bp_intv_b;
+	for (int i : bp_a) {
+		Interval intv;
+		intv.l = max(i - BP_FUZZY, 0);
+		intv.r = min(i + BP_FUZZY, n);
+		bp_intv_a.push_back(intv);
 	}
-	int sum1 = accumulate(bp_a.begin(), bp_a.end(), 0);
-	int sum2 = accumulate(bp_b.begin(), bp_b.end(), 0);
-	fprintf(stderr, "Identified %d and %d break points in two sequences\n", sum1, sum2);
+	for (int i : bp_b) {
+		Interval intv;
+		intv.l = max(i - BP_FUZZY, 0);
+		intv.r = min(i + BP_FUZZY, m);
+		bp_intv_b.push_back(intv);
+	}
 
 	const int MAT_SCORE = opt.mat_score;
 	const int MIS_PEN = opt.mis_pen;
@@ -554,10 +549,17 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 	for (int j = 1; j <= m; j++) {
 		dp[0][j].F = dp[0][j].H = GAP_O + j * GAP_E;
 	}
-	int last_row = -1;
+	int intv_i = 0;
+	vector<int> row_max(m + 1, -INF);
+	vector<int> row_id(m + 1, -INF);
 	for (int i = 1; i <= n; i++) {
+		while (intv_i < n and bp_intv_a[intv_i].r < i) intv_i++;
+		bool in_bp_a = false;
+		if (intv_i < n and bp_intv_a[intv_i].l <= i) {
+			in_bp_a = true;
+		}
 		dp[i][0].E = dp[i][0].H = GAP_O + i * GAP_E;
-		int last_col = -1;
+		int intv_j = 0, col_max = -INF, col_id = -1;
 		for (int j = 1; j <= m; j++) {
 			dp[i][j].E = max(dp[i-1][j].H + GAP_O, dp[i-1][j].E) + GAP_E;
 			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
@@ -577,27 +579,87 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 				dp[i][j].pi = i-1;
 				dp[i][j].pj = j-1;
 			}
-			// New path between two break points
-			if (bp_b[j] and last_col != -1) {
-				dp[i][j].B2 = max(dp[i][last_col].H + DEL_DUP_O, dp[i][last_col].B2) + DEL_DUP_E;
-				if (dp[i][j].B2 > dp[i][j].H) {
-					dp[i][j].H = dp[i][j].B2;
-					dp[i][j].pi = i;
-					dp[i][j].pj = last_col;
+
+			while (bp_intv_b[intv_j].r < j and intv_j < m) intv_j++;
+			bool in_bp_b = false;
+			if (intv_j < m and bp_intv_b[intv_j].l <= j) {
+				 in_bp_b = true;
+			}
+
+			// At the crossing of breakpoints
+			if (in_bp_a and in_bp_b) {
+				// Breakpoint jump between columns
+				if (col_max != -INF) {
+					dp[i][j].B2 = col_max;
+					if (dp[i][j].B2 > dp[i][j].H) {
+						dp[i][j].H = dp[i][j].B2;
+						dp[i][j].pi = i;
+						dp[i][j].pj = col_id;
+					}
+					if (1) {
+						// Sanity check
+						assert(intv_j > 0);
+						int l = bp_intv_b[intv_j-1].l;
+						int r = bp_intv_b[intv_j-1].r;
+						int verify_max = -INF;
+						for (int k = l; k <= r; k++) {
+							int tmp = max(dp[i][k].H + DEL_DUP_O, dp[i][k].B2) + DEL_DUP_E;
+							if (tmp > verify_max) {
+								verify_max = tmp;
+							}
+						}
+						assert(verify_max == col_max);
+					}
+				}
+				// Breakpoint jump between rows
+				if (row_max[j] != -INF) {
+					dp[i][j].B1 = row_max[j];
+					if (dp[i][j].B1 > dp[i][j].H) {
+						dp[i][j].H = dp[i][j].B1;
+						dp[i][j].pi = row_id[j];
+						dp[i][j].pj = j;
+					}
+					if (1) {
+						// Sanity check
+						assert(intv_i > 0);
+						int l = bp_intv_a[intv_i-1].l;
+						int r = bp_intv_a[intv_i-1].r;
+						int verify_max = -INF;
+						for (int k = l; k <= r; k++) {
+							int tmp = max(dp[k][j].H + DEL_DUP_O, dp[k][j].B1) + DEL_DUP_E;
+							if (tmp > verify_max) {
+								verify_max = tmp;
+							}
+						}
+						assert(verify_max == row_max[j]);
+					}
+				}
+				// fprintf(stderr, "(%d,%d), H=%d, B1=%d, B2=%d\n", i, j, dp[i][j].H, dp[i][j].B1, dp[i][j].B2);
+			}
+
+			// Leave breakpoint interval
+			if (in_bp_b and bp_intv_b[intv_j].r == j) {
+				col_max = -INF;
+				for (int k = bp_intv_b[intv_j].l; k <= bp_intv_b[intv_j].r; k++) {
+					int tmp = max(dp[i][k].H + DEL_DUP_O, dp[i][k].B2) + DEL_DUP_E;
+					if (tmp > col_max) {
+						col_max = tmp;
+						col_id = k;
+					}
 				}
 			}
-			if (bp_b[j]) last_col = j;
 
-			if (bp_a[i] and last_row != -1) {
-				dp[i][j].B1 = max(dp[last_row][j].H + DEL_DUP_O, dp[last_row][j].B1) + DEL_DUP_E;
-				if (dp[i][j].B1 > dp[i][j].H) {
-					dp[i][j].H = dp[i][j].B1;
-					dp[i][j].pi = last_row;
-					dp[i][j].pj = j;
+			if (in_bp_a and in_bp_b and bp_intv_a[intv_i].r == i) {
+				row_max[j] = -INF;
+				for (int k = bp_intv_a[intv_i].l; k <= bp_intv_a[intv_i].r; k++) {
+					int tmp = max(dp[k][j].H + DEL_DUP_O, dp[k][j].B1) + DEL_DUP_E;
+					if (tmp > row_max[j]) {
+						row_max[j] = tmp;
+						row_id[j] = k;
+					}
 				}
 			}
 		}
-		if (bp_a[i]) last_row = i;
 	}
 
 	// CIGAR generation
@@ -677,7 +739,7 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 	reverse(cv.begin(), cv.end());
 	reverse(ext_a.begin(), ext_a.end());
 	reverse(ext_b.begin(), ext_b.end());
-	fprintf(stderr, "%d deletions, %d insertions, %d(%d) matches(mismatches) and %d duplication deletions\n", del_n, ins_n, mat_n, mis_n, dup_n);
+	fprintf(stderr, "%d deletions, %d insertions, %d matches, %d mismatches and %d duplication deletions\n", del_n, ins_n, mat_n, mis_n, dup_n);
 	if (DEBUG) {
 		fprintf(stderr, "%s\n", ext_a.data());
 		fprintf(stderr, "%s\n", ext_b.data());
@@ -706,18 +768,10 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
 		// Meta information and breakpoints
 		out << "Seq1 length: " << n << ", Seq2 length: " << m << endl;
 		out << "Breakpoints1:" << endl;
-		for (int i = 1; i <= n; i++) {
-			if (bp_a[i]) {
-				out << i << " ";
-			}
-		}
+		for (int i: bp_a) out << i << " ";
 		out << endl;
 		out << "Breakpoints2:" << endl;
-		for (int i = 1; i <= m; i++) {
-			if (bp_b[i]) {
-				out << i << " ";
-			}
-		}
+		for (int i: bp_b) out << i << " ";
 		out << endl;
 
 		ti = n; tj = m;
