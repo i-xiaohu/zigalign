@@ -48,19 +48,14 @@ def visualize(bt_fn):
 
     lx, ly, lc = points[0]
     for (x, y, c) in points[1:]:
-        # FIXME: just a guess; ZigAlign should provide accurate result by DP
         if lc == 3:
             if ly == y:
                 offset = lx - x
-                plt.plot([y-offset, y], [x, lx], color='blue', linestyle='--')
-                plt.plot([y-offset, y], [x, x], color='blue', linestyle='--')
-        if lc == 3:
-            if ly == y:
-                offset = lx - x
-                plt.text(y, (lx + x) / 2, 'copy %d' % offset, fontsize=7)
+                plt.text(y, (lx + x) / 2, '%d' % offset, fontsize=7)
+                plt.plot([ly, y], [lx, x], color=color_list[lc])
             else:
                 offset = ly - y
-                plt.text(y, x, 'delete %d' % offset, fontsize=7)
+                plt.text(y, x, '%d' % offset, fontsize=7)
                 plt.plot([ly, y], [lx, x], color=color_list[lc])
         else:
             plt.plot([ly, y], [lx, x], color=color_list[lc])
@@ -70,7 +65,6 @@ def visualize(bt_fn):
     plt.plot([0, 0], [0, 0], color='green', label='mat/mis')
     plt.plot([0, 0], [0, 0], color='grey', linestyle='--', label='breakpoint')
     plt.plot([0, 0], [0, 0], color='red', label='dup del')
-    plt.plot([0, 0], [0, 0], color='blue', linestyle='--', label='copy')
     plt.legend(loc='upper right')
 
     fig_fn = bt_fn.rstrip(".txt") + ".png"
