@@ -35,7 +35,7 @@ pair<string,string> input_fasta_seq(const char *fn)
 		char *s = ks->seq.s;
 		seq.resize(l);
 		for (int i = 0; i < l; i++) {
-			seq[i] = (char)toupper(s[i]);
+			s[i] = (char)toupper(s[i]);
 			if (s[i] !=  'A' and s[i] != 'C' and s[i] != 'G' and s[i] != 'T') {
 				fprintf(stderr, "Unsupported character `%c`\n", s[i]);
 				abort();
