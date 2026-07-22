@@ -137,6 +137,7 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 	}
 	// Global alignment in left-down triangle
 	dp[0][0].H = 0;
+	dp[0][0].D_beg = 1;
 	for (int i = 1; i <= n; i++) {
 		dp[i][0].E = dp[i][0].H = GAP_O + GAP_E * i;
 		for (int j = 1; j < i; j++) {
@@ -176,12 +177,13 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 			dp[i][i].pj = i-1;
 			dp[i][i].event = NORMAL;
 		}
+		dp[i][i].D_beg = dp[i-1][i-1].D_beg;
 
 		if (i > MIN_UNIT) {
 			// D gate comes from the last row
 			int max_value = dp[i-1][i-1].H; // Diagonal must be the maximum in regular matrix
 			int D_end = i - 1;
-			int D_beg = -1;
+			int D_beg = dp[i-1][i-1].D_beg; // To prevent illegal path
 			int event = START_REP;
 			for (int j = 1; j < i-1; j++) {
 				// Only start new copy after the end of duplication to prevent illegal path
@@ -196,7 +198,7 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 			// 0 is excluded because a match/mismatch is mandatory
 			if (event == START_REP) {
 				// Open duplication
-				for (int j = 1; j <= D_end - MIN_UNIT + 1; j++) {
+				for (int j = D_beg; j <= D_end - MIN_UNIT + 1; j++) {
 					int tmp = (seq[i-1] == seq[j-1] ? TR_MAT_SCORE : TR_MIS_PEN) + OPEN_TR;
 					dp[i][j].D_gate = max_value + tmp;
 					dp[i][j].D_beg = j;
@@ -211,7 +213,7 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 					// No penalty for new copy
 					int tmp = (seq[i-1] == seq[j-1] ? TR_MAT_SCORE : TR_MIS_PEN);
 					dp[i][j].D_gate = max_value + tmp;
-					dp[i][j].D_beg = D_beg; // Inherit from previous gate
+					dp[i][j].D_beg = j; // Does it make more sense?
 					dp[i][j].D_end = D_end;
 					dp[i][j].pi = i-1;
 					dp[i][j].pj = D_end;
@@ -225,9 +227,11 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 			int v_score = -INF, h_score = -INF, d_score = -INF;
 			if (j >= dp[i-1][j].D_beg and j <= dp[i-1][j].D_end) {
 				v_score = max(max(dp[i-1][j].D_gate, dp[i-1][j].dh) + TR_GAP_O, dp[i-1][j].de) + TR_GAP_E;
+				dp[i][j].de = v_score;
 			}
 			if (j >= dp[i][j-1].D_beg and j <= dp[i][j-1].D_end) {
 				h_score = max(max(dp[i][j-1].D_gate, dp[i][j-1].dh) + TR_GAP_O, dp[i][j-1].df) + TR_GAP_E;
+				dp[i][j].df = h_score;
 			}
 			if (j >= dp[i-1][j-1].D_beg and j <= dp[i-1][j-1].D_end) {
 				int tmp = (seq[i-1] == seq[j-1] ? TR_MAT_SCORE : TR_MIS_PEN);
@@ -263,18 +267,20 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 		// The alignment above can't reach the diagonal
 
 		// B transfer: close a repetition
-		int max_value = -INF, max_j = -1;
+		int max_value = -INF, max_j = -1, limit = -1;
 		for (int j = 1; j < i; j++) {
 			// Only return to diagonal if sub-matrix reaches the lower-right corner
 			if (dp[i][j].dh > max_value and dp[i][j].D_end == j) {
 				max_value = dp[i][j].dh;
 				max_j = j;
+				limit = dp[i][j].D_beg;
 			}
 		}
 		if (max_value + CLOSE_TR > dp[i][i].H) {
 			dp[i][i].H = max_value + CLOSE_TR;
 			dp[i][i].pi = i;
 			dp[i][i].pj = max_j;
+			dp[i][i].D_beg = limit;
 			dp[i][i].event = END_REP;
 		}
 	}
@@ -349,7 +355,7 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 	}
 	reverse(tr_array.begin(), tr_array.end());
 	if (DEBUG) {
-		fprintf(stdout, "Before Normalization\n");
+		fprintf(stdout, "Tandem repeat groups\n");
 		for (const TandemRepeat &group: tr_array) {
 			fprintf(stdout, "Template: [%d, %d), Units:", group.temp.l, group.temp.r);
 			for (const Interval &intv: group.units) {
@@ -358,8 +364,9 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 			fprintf(stdout, "\n");
 		}
 	}
-	// Normalize repeat groups
-	double MIN_OVERLAP_COEF = 0.5;
+
+	// Merge tandem groups
+	double MIN_OVERLAP_COEF = 0.9;
 	int new_size = 0;
 	for (int i = 0; i < tr_array.size(); ) {
 		TandemRepeat &tr = tr_array[i];
@@ -370,7 +377,6 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 			int r = tr_array[j].temp.r;
 			int len = r - l;
 			int overlap = max(range_r - l, 0);
-			// FIXME: the merge is unsafe because template might change
 			if (overlap > MIN_OVERLAP_COEF * len) {
 				// Merge into previous group
 				for (const Interval &intv: tr_array[j].units) {
@@ -385,46 +391,30 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 		tr_array[new_size++] = tr;
 		i = next;
 	}
-	tr_array.resize(new_size);
-	if (1) {
-		fprintf(stdout, "After Normalization\n");
-		for (const TandemRepeat &group: tr_array) {
-			fprintf(stdout, "Template: [%d, %d), Units:", group.temp.l, group.temp.r);
-			for (const Interval &intv: group.units) {
-				fprintf(stdout, " [%d, %d)", intv.l, intv.r);
-			}
-			fprintf(stdout, "\n");
-		}
-	}
 
-	// Collect breakpoints
+	// FIXME: This is incorrect because it mixes different groups of tandem repeats
+	int rep_end = -1;
 	vector<int> ret;
 	for (const TandemRepeat &group: tr_array) {
-		ret.push_back(group.temp.l-1);
-		ret.push_back(group.temp.r-1);
+		if (group.temp.l-1 > rep_end) ret.push_back(group.temp.l-1);
+		if (group.temp.r-1 > rep_end) ret.push_back(group.temp.r-1);
 		for (int i = 0; i < group.units.size(); i++) {
-			ret.push_back(group.units[i].r-1);
+			if (group.units[i].r-1 > rep_end) {
+				ret.push_back(group.units[i].r-1);
+			}
 		}
-	}
-	// Correct breakpoints must be naturally sorted
-	for (int i = 1; i < ret.size(); i++) {
-		assert(ret[i] > ret[i-1]);
+		if (not ret.empty()) rep_end = ret.back();
 	}
 
 	if (ret.empty()) return ret;
 
-	// FIXME: fix bugs of fuzzy breakpoints
-	int new_n = 1, last_num = ret[0];
+	// Breakpoints must be naturally sorted
 	for (int i = 1; i < ret.size(); i++) {
-		if (ret[i] > last_num + 20) {
-			ret[new_n++] = ret[i];
-			last_num = ret[i];
-		}
+		assert(ret[i] > ret[i-1]);
 	}
-	ret.resize(new_n);
 
 	if (1) {
-		fprintf(stdout, "Breakpoints:\n");
+		fprintf(stdout, "Breakpoints:");
 		for (int i : ret) {
 			fprintf(stdout, " %d", i);
 		}
@@ -863,7 +853,50 @@ int usage(const ZigOptions &o) {
 	return 1;
 }
 
+void process_long(const char *fn) {
+	pair<string, string> pair = input_fasta_seq(fn);
+	cout << pair.first << endl;
+	cout << pair.second.length() << endl;
+	const char *seq = pair.second.data();
+	int n = pair.second.length();
+
+	// NOTE: I got different results from n = 20000; n might affect the accuracy of breakpoints
+	// NOTE: serial execution because of cyclic repeats
+	const int part_len = 40000;
+	ZigOptions opt;
+	opt.close_tr_pen = -15; // It will increase the continuity of zigzag lines
+
+	vector<int> all_bps;
+	all_bps.push_back(0);
+	int offset = 0;
+	int cnt = 0;
+	while (offset < n) {
+		int len = min(n - offset, part_len);
+		fprintf(stderr, "offset=%d, length=%d\n", offset, len);
+		string vis_fn = "pairwise/hors/hor" + to_string(++cnt) + ".txt";
+		vector<int> bps = self_alignment(opt, len, seq + offset, vis_fn);
+		for (int i = 1; i < bps.size(); i++) {
+			all_bps.push_back(bps[i] + offset);
+		}
+
+		// Continue from the penultimate breakpoints
+		if (bps.size() > 2) {
+			offset += bps[bps.size() - 2] + 1;
+		} else {
+			offset += len;
+		}
+	}
+	fprintf(stdout, "Stitched %ld breakpoints\n", all_bps.size());
+	for (int b: all_bps) {
+		fprintf(stdout, "%d ", b);
+	}
+	fprintf(stdout, "\n");
+}
+
 int main(int argc, char *argv[]) {
+	process_long(argv[1]);
+	return 1;
+
 	double ctime = cputime(), rtime = realtime();
 	ZigOptions opt;
 	if (argc == 1) return usage(opt);
