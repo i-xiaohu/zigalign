@@ -889,13 +889,13 @@ void align_with_dups2(const ZigOptions &opt,
 	cb.l = -bw; // For movement of the band
 	cb.r = bw;
 	calc_band.push_back(cb);
-	if (t_bp_intv.size() > 0 and t_bp_intv[0].l <= 0 and t_bp_intv[0].r >= 0) {
-		for (const Interval &v: q_bp_intv) {
-			cb.l = v.l - bw;
-			cb.r = v.r + bw;
-			calc_band.push_back(cb);
-		}
-	}
+//	if (t_bp_intv.size() > 0 and t_bp_intv[0].l <= 0 and t_bp_intv[0].r >= 0) {
+//		for (const Interval &v: q_bp_intv) {
+//			cb.l = v.l - bw;
+//			cb.r = v.r + bw;
+//			calc_band.push_back(cb);
+//		}
+//	}
 	calc_band = merge_intervals(calc_band);
 	for (int i = 0; i < calc_band.size(); i++) {
 		const Interval &v = calc_band[i];
@@ -988,6 +988,7 @@ void align_with_dups2(const ZigOptions &opt,
 			while (q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].r < curr_j) q_pointer++;
 			bool in_q_bp = (q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].l <= curr_j);
 			if (in_t_bp and in_q_bp) {
+				// TODO: remove the redundant calculation
 				if (q_pointer > 0) {
 					// Jump from the last breakpoint kmer
 					int l1 = q_bp_intv[q_pointer-1].l, r1 = q_bp_intv[q_pointer-1].r;
@@ -1004,6 +1005,7 @@ void align_with_dups2(const ZigOptions &opt,
 						}
 					}
 					if (ans != -1) {
+						assert(dp[i][ans].cj == l1);
 						for (int k = ans; k < j; k++) {
 							if (dp[i][k].cj > r1) break;
 							assert(dp[i][k].cj >= l1 and dp[i][k].cj <= r1);
@@ -1026,7 +1028,7 @@ void align_with_dups2(const ZigOptions &opt,
 					int l1 = t_bp_intv[t_pointer-1].l, r1 = t_bp_intv[t_pointer-1].r;
 					int max_score = -INF, max_id = -1;
 					for (int k = l1; k <= r1; k++) {
-						int low = 0, high = j-1, ans = -1;
+						int low = 0, high = dp[k].size()-1, ans = -1;
 						while (low <= high) {
 							int mid = (low + high) >> 1;
 							if (dp[k][mid].cj > curr_j) {
@@ -1038,6 +1040,7 @@ void align_with_dups2(const ZigOptions &opt,
 								break;
 							}
 						}
+						assert(ans != -1);
 						if (ans != -1) {
 							int tmp = max(dp[k][ans].H + DEL_DUP_O, dp[k][ans].B1) + DEL_DUP_E;
 							if (tmp > max_score) {
