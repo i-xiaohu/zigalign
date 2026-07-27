@@ -511,7 +511,7 @@ struct Dp2Cell {
 	}
 };
 
-void align_with_dups2(const ZigOptions &opt,
+void align_with_dups(const ZigOptions &opt,
 	int t_len, const char *t, const vector<int> &t_bp,
 	int q_len, const char *q, const vector<int> &q_bp)
 {
@@ -797,309 +797,185 @@ void align_with_dups2(const ZigOptions &opt,
 	}
 }
 
-void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2)
+struct Dp3Cell {
+	int ci, cj; // Coordinates in DP matrix
+	int E, F, B1, B2, H;
+	int pi, pj; // Traceback in stored matrix
+	Dp3Cell() {
+		E = F = H = B1 = B2 = -INF;
+		pi = pj = -1;
+	}
+};
+
+vector<Interval> merge_intervals(const vector<Interval> &v) {
+	// Input intervals must be l-sorted
+	assert(v.size() > 0);
+	for (int i = 1; i < v.size(); i++) {
+		assert(v[i].l >= v[i-1].l);
+	}
+	vector<Interval> ret;
+	Interval a = v[0];
+	for (int i = 1; i < v.size(); i++) {
+		const Interval &t = v[i];
+		if (t.l > a.r + 1) {
+			ret.push_back(a);
+			a = t;
+		} else {
+			a.r = max(t.r, a.r); // Merge overlapping intervals
+		}
+	}
+	ret.push_back(a);
+	return ret;
+}
+
+int MAX_BAND_WIDTH = 100;
+
+void align_with_dups2(const ZigOptions &opt,
+	int t_len, const char *t, const vector<int> &t_bp,
+	int q_len, const char *q, const vector<int> &q_bp)
 {
-	pair<string, string> pair1 = input_fasta_seq(fn1);
-	pair<string, string> pair2 = input_fasta_seq(fn2);
-	string name1 = pair1.first, seq1 = pair1.second;
-	string name2 = pair2.first, seq2 = pair2.second;
-	const int n = seq1.length();
-	const int m = seq2.length();
-	const char *a = seq1.data();
-	const char *b = seq2.data();
-	string vis_self_fn1, vis_self_fn2;
-	if (opt.vis_prefix) {
-		vis_self_fn1 = string(opt.vis_prefix) + "_s1.txt";
-		vis_self_fn2 = string(opt.vis_prefix) + "_s2.txt";
-	}
-	vector<int> bp_a = self_alignment(opt, n, a, vis_self_fn1);
-	vector<int> bp_b = self_alignment(opt, m, b, vis_self_fn2);
-	// TODO: Is there a proper way to determine this value?
-	const int BP_FUZZY = 10; // Optimal B-transfer occurs around breakpoints
-	// Set breakpoint fuzzy intervals
-	vector<Interval> bp_intv_a, bp_intv_b;
-	for (int i : bp_a) {
+	// Breakpoints from self-alignment are not optimal in pairwise alignment
+	const int BP_HALF_KMER = 5; // 5 bp before and after the breakpoint, i.e., 11-mer
+	vector<Interval> t_bp_intv;
+	for (int i = 0; i < t_bp.size(); i++) {
+		// If breakpoint kmers overlap with other kmers, then use the breakpoint itself.
+		bool overlapped = false;
+		if (i > 0 and t_bp[i] - BP_HALF_KMER <= t_bp[i-1] + BP_HALF_KMER) overlapped = true;
+		if (i+1 < t_bp.size() and t_bp[i] + BP_HALF_KMER >= t_bp[i+1] - BP_HALF_KMER) overlapped = true;
 		Interval intv;
-		intv.l = max(i - BP_FUZZY, 0);
-		intv.r = min(i + BP_FUZZY, n);
-		bp_intv_a.push_back(intv);
+		if (not overlapped) {
+			intv.l = max(0, t_bp[i] - BP_HALF_KMER);
+			intv.r = min(t_len, t_bp[i] + BP_HALF_KMER);
+		} else {
+			intv.l = t_bp[i];
+			intv.r = t_bp[i];
+		}
+		t_bp_intv.push_back(intv);
 	}
-	for (int i : bp_b) {
+	vector<Interval> q_bp_intv;
+	for (int i = 0; i < q_bp.size(); i++) {
+		bool overlapped = false;
+		if (i > 0 and q_bp[i] - BP_HALF_KMER <= q_bp[i-1] + BP_HALF_KMER) overlapped = true;
+		if (i+1 < q_bp.size() and q_bp[i] + BP_HALF_KMER >= q_bp[i+1] - BP_HALF_KMER) overlapped = true;
 		Interval intv;
-		intv.l = max(i - BP_FUZZY, 0);
-		intv.r = min(i + BP_FUZZY, m);
-		bp_intv_b.push_back(intv);
+		if (not overlapped) {
+			intv.l = max(0, q_bp[i] - BP_HALF_KMER);
+			intv.r = min(q_len, q_bp[i] + BP_HALF_KMER);
+		} else {
+			intv.l = q_bp[i];
+			intv.r = q_bp[i];
+		}
+		q_bp_intv.push_back(intv);
 	}
 
+	// Pairwise alignment
 	const int MAT_SCORE = opt.mat_score;
 	const int MIS_PEN = opt.mis_pen;
 	const int GAP_O = opt.gap_o;
 	const int GAP_E = opt.gap_e;
 	const int DEL_DUP_O = opt.del_dup_o;
 	const int DEL_DUP_E = opt.del_dup_e;
-	vector<vector<Dp2Cell>> dp;
-	dp.resize(n + 1);
-	for (int i = 0; i <= n; i++) {
-		dp[i].resize(m + 1);
-	}
-	dp[0][0].H = 0;
-	for (int j = 1; j <= m; j++) {
-		dp[0][j].F = dp[0][j].H = GAP_O + j * GAP_E;
-	}
-	int intv_i = 0;
-	vector<int> row_max(m + 1, -INF);
-	vector<int> row_id(m + 1, -INF);
-	for (int i = 1; i <= n; i++) {
-		while (intv_i < n and bp_intv_a[intv_i].r < i) intv_i++;
-		bool in_bp_a = false;
-		if (intv_i < n and bp_intv_a[intv_i].l <= i) {
-			in_bp_a = true;
+
+	int bw = MAX_BAND_WIDTH; // Bandwidth
+	vector<vector<Dp3Cell>> dp;
+	dp.resize(t_len + 1);
+
+	// The first row
+	// In each row, I obtain the cells that will be calculated
+	vector<Interval> calc_band;
+	Interval cb;
+	cb.l = -bw; // For movement of the band
+	cb.r = bw;
+	calc_band.push_back(cb);
+	if (t_bp_intv.size() > 0 and t_bp_intv[0].l <= 0 and t_bp_intv[0].r >= 0) {
+		for (const Interval &v: q_bp_intv) {
+			cb.l = v.l - bw;
+			cb.r = v.r + bw;
+			calc_band.push_back(cb);
 		}
-		dp[i][0].E = dp[i][0].H = GAP_O + i * GAP_E;
-		int intv_j = 0, col_max = -INF, col_id = -1;
-		for (int j = 1; j <= m; j++) {
-			dp[i][j].E = max(dp[i-1][j].H + GAP_O, dp[i-1][j].E) + GAP_E;
-			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
-			int M = dp[i-1][j-1].H + (a[i-1] == b[j-1] ? MAT_SCORE : MIS_PEN);
-			if (dp[i][j].E > dp[i][j].H) {
-				dp[i][j].H = dp[i][j].E;
-				dp[i][j].pi = i-1;
-				dp[i][j].pj = j;
-			}
-			if (dp[i][j].F > dp[i][j].H) {
-				dp[i][j].H = dp[i][j].F;
-				dp[i][j].pi = i;
-				dp[i][j].pj = j-1;
-			}
-			if (M > dp[i][j].H) {
-				dp[i][j].H = M;
-				dp[i][j].pi = i-1;
-				dp[i][j].pj = j-1;
-			}
+	}
+	calc_band = merge_intervals(calc_band);
+	for (int i = 0; i < calc_band.size(); i++) {
+		const Interval &v = calc_band[i];
+		printf("[%d, %d]\n", v.l, v.r);
+		int l = max(0, v.l);
+		int r = min(q_len, v.r);
+		for (int j = l; j <= r; j++) {
+			Dp3Cell c;
+			c.ci = 0;
+			c.cj = j;
+			dp[0].push_back(c);
+		}
+	}
+	assert(dp[0][0].ci == 0 and dp[0][0].cj == 0);
+	dp[0][0].H = 0; // Left-top corner of the partial matrix
+	dp[0][0].E = dp[0][0].F = GAP_O; // For convenient calculation
+	for (int j = 1; j < dp[0].size(); j++) {
+		if (dp[0][j].cj == dp[0][j-1].cj + 1 and dp[0][j-1].F != -INF) {
+			dp[0][j].F = dp[0][j].H = dp[0][j-1].F + GAP_E;
+		} // else the previous cell is not stored
+		// FIXME: I should process breakpoints in the first row
+	}
 
-			while (bp_intv_b[intv_j].r < j and intv_j < m) intv_j++;
-			bool in_bp_b = false;
-			if (intv_j < m and bp_intv_b[intv_j].l <= j) {
-				 in_bp_b = true;
+	int t_pointer = 0;
+	for (int i = 1; i <= t_len; i++) {
+		while (t_pointer < t_bp_intv.size() and t_bp_intv[t_pointer].r < i) t_pointer++;
+		bool in_t_bp = false;
+		if (t_pointer < t_bp_intv.size() and t_bp_intv[t_pointer].l <= i) in_t_bp = true;
+		// Shift the band
+		for (Interval &v: calc_band) {
+			int l = max(0, ++v.l);
+			int r = min(q_len, ++v.r);
+			for (int j = l; j <= r; j++) {
+				Dp3Cell c;
+				c.ci = i;
+				c.cj = j;
+				dp[i].push_back(c);
 			}
-
-			// At the crossing of breakpoints
-			if (in_bp_a and in_bp_b) {
-				// Breakpoint jump between columns
-				if (col_max != -INF) {
-					dp[i][j].B2 = col_max;
-					if (dp[i][j].B2 > dp[i][j].H) {
-						dp[i][j].H = dp[i][j].B2;
-						dp[i][j].pi = i;
-						dp[i][j].pj = col_id;
-					}
-					if (1) {
-						// Sanity check
-						assert(intv_j > 0);
-						int l = bp_intv_b[intv_j-1].l;
-						int r = bp_intv_b[intv_j-1].r;
-						int verify_max = -INF;
-						for (int k = l; k <= r; k++) {
-							int tmp = max(dp[i][k].H + DEL_DUP_O, dp[i][k].B2) + DEL_DUP_E;
-							if (tmp > verify_max) {
-								verify_max = tmp;
-							}
-						}
-						assert(verify_max == col_max);
-					}
-				}
-				// Breakpoint jump between rows
-				if (row_max[j] != -INF) {
-					dp[i][j].B1 = row_max[j];
-					if (dp[i][j].B1 > dp[i][j].H) {
-						dp[i][j].H = dp[i][j].B1;
-						dp[i][j].pi = row_id[j];
-						dp[i][j].pj = j;
-					}
-					if (1) {
-						// Sanity check
-						assert(intv_i > 0);
-						int l = bp_intv_a[intv_i-1].l;
-						int r = bp_intv_a[intv_i-1].r;
-						int verify_max = -INF;
-						for (int k = l; k <= r; k++) {
-							int tmp = max(dp[k][j].H + DEL_DUP_O, dp[k][j].B1) + DEL_DUP_E;
-							if (tmp > verify_max) {
-								verify_max = tmp;
-							}
-						}
-						assert(verify_max == row_max[j]);
-					}
-				}
-				// fprintf(stderr, "(%d,%d), H=%d, B1=%d, B2=%d\n", i, j, dp[i][j].H, dp[i][j].B1, dp[i][j].B2);
-			}
-
-			// Leave breakpoint interval
-			if (in_bp_b and bp_intv_b[intv_j].r == j) {
-				col_max = -INF;
-				for (int k = bp_intv_b[intv_j].l; k <= bp_intv_b[intv_j].r; k++) {
-					int tmp = max(dp[i][k].H + DEL_DUP_O, dp[i][k].B2) + DEL_DUP_E;
-					if (tmp > col_max) {
-						col_max = tmp;
-						col_id = k;
-					}
+		}
+		int mon_j = 0;
+		for (int j = 0; j < dp[i].size(); j++) {
+			int curr_j = dp[i][j].cj;
+			// Diagonal transfer
+			while (mon_j < dp[i-1].size() and dp[i-1][mon_j].cj < curr_j-1) mon_j++;
+			if (mon_j < dp[i-1].size() and dp[i-1][mon_j].cj == curr_j-1) {
+				int M = dp[i-1][mon_j].H + (t[i-1] == q[curr_j-1] ? MAT_SCORE : MIS_PEN);
+				if (M > dp[i][j].H) {
+					dp[i][j].H = M;
+					dp[i][j].pi = i-1;
+					dp[i][j].pj = mon_j;
 				}
 			}
 
-			if (in_bp_a and in_bp_b and bp_intv_a[intv_i].r == i) {
-				row_max[j] = -INF;
-				for (int k = bp_intv_a[intv_i].l; k <= bp_intv_a[intv_i].r; k++) {
-					int tmp = max(dp[k][j].H + DEL_DUP_O, dp[k][j].B1) + DEL_DUP_E;
-					if (tmp > row_max[j]) {
-						row_max[j] = tmp;
-						row_id[j] = k;
-					}
+			// Vertical transfer
+			while (mon_j < dp[i-1].size() and dp[i-1][mon_j].cj < curr_j) mon_j++;
+			if (mon_j < dp[i-1].size() and dp[i-1][mon_j].cj == curr_j) {
+				dp[i][j].E = max(dp[i-1][mon_j].H + GAP_O, dp[i-1][mon_j].E) + GAP_E;
+				if (dp[i][j].E > dp[i][j].H) {
+					dp[i][j].H = dp[i][j].E;
+					dp[i][j].pi = i-1;
+					dp[i][j].pj = mon_j;
+				}
+			}
+
+			// Horizontal transfer
+			if (j > 0 and curr_j == dp[i][j-1].cj + 1) {
+				dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
+				if (dp[i][j].F > dp[i][j].H) {
+					dp[i][j].H = dp[i][j].F;
+					dp[i][j].pi = i;
+					dp[i][j].pj = j-1;
 				}
 			}
 		}
 	}
-
-	// CIGAR generation
-	int ti = n, tj = m;
-	int del_n = 0, ins_n = 0, mat_n = 0, mis_n = 0, dup_n = 0;
-	string ext_a, ext_b;
-	vector<int> cv;
-	// All operations occur on target sequence _a_
-	const int COP_M = 0;
-	const int COP_I = 1;
-	const int COP_D = 2;
-	const int DUP_I = 3;
-	const int DUP_D = 4;
-	const string OP_CHAR = "MIDID";
-	int op_type = -1, last_op = -1, op_cnt = 0;
-	while (ti > 0 and tj > 0) {
-		const Dp2Cell &t = dp[ti][tj];
-		if (t.pi == ti - 1 and t.pj == tj) { // Deletion from _a_
-			op_type = COP_D;
-			del_n++;
-			ext_a += a[ti-1];
-			ext_b += '-';
-		} else if (t.pi == ti and t.pj == tj - 1) { // Insertion into _a_
-			op_type = COP_I;
-			ins_n++;
-			ext_a += '-';
-			ext_b += b[tj-1];
-		} else if (t.pi == ti - 1 and t.pj == tj - 1) { // Match/Mismatch
-			op_type = COP_M;
-			if (a[ti-1] == b[tj-1]) mat_n++;
-			else mis_n++;
-			ext_a += a[ti-1];
-			ext_b += b[tj-1];
-		} else {
-			if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
-//			fprintf(stderr, "%d %d -> %d %d\n", ti, tj, t.pi, t.pj);
-			if (ti == t.pi) { // Duplication insertion into _a_
-				op_type = DUP_I;
-				op_cnt = tj - t.pj;
-				for (int j = tj; j > t.pj; j--) {
-					ext_a += '+';
-					ext_b += b[j-1];
-				}
-			} else { // Duplication deletion from _a_
-				op_type = DUP_D;
-				op_cnt = ti - t.pi;
-				for (int i = ti; i > t.pi; i--) {
-					ext_a += a[i-1];
-					ext_b += '+';
-				}
-			}
-
-			// TODO: is it necessary to align template unit to copied units?
-			// If so, which unit is the best template?
-			cv.push_back(op_cnt << 4 | op_type); // Do not merge duplication indels
-			dup_n++;
-			op_type = last_op = -1;
-			op_cnt = -1;
-		}
-		// Merge match/mismatch/indels
-		if (last_op != -1 and op_type != last_op) {
-			cv.push_back(op_cnt << 4 | last_op);
-			op_cnt = 0;
-		}
-		last_op = op_type;
-		op_cnt++;
-		ti = t.pi;
-		tj = t.pj;
+	cout << "SI result " << dp[t_len].back().H << endl;
+	int raw_size = (t_len + 1) * (q_len + 1);
+	int part_size = 0;
+	for (int i = 0; i <= t_len; i++) {
+		part_size += dp[i].size();
 	}
-	if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
-	if (ti > 0) {
-		cv.push_back(ti << 4 | COP_D);
-	}
-	if (tj > 0) {
-		cv.push_back(tj << 4 | COP_I);
-	}
-	reverse(cv.begin(), cv.end());
-	reverse(ext_a.begin(), ext_a.end());
-	reverse(ext_b.begin(), ext_b.end());
-	fprintf(stderr, "%d deletions, %d insertions, %d matches, %d mismatches and %d duplication deletions\n", del_n, ins_n, mat_n, mis_n, dup_n);
-	if (DEBUG) {
-		fprintf(stderr, "%s\n", ext_a.data());
-		fprintf(stderr, "%s\n", ext_b.data());
-		string non_a, non_b;
-		for (char c: ext_a) {
-			if (c != '-' and c != '+') {
-				non_a += c;
-			}
-		}
-		for (char c: ext_b) {
-			if (c != '-' and c != '+') {
-				non_b += c;
-			}
-		}
-		assert(non_a.length() == n);
-		assert(non_a == string(a));
-		assert(non_b.length() == m);
-		assert(non_b == string(b));
-	}
-	paf_format(name2, seq2, name1, seq1, cv);
-
-	if (opt.vis_prefix) {
-		string pair_vis_fn = string(opt.vis_prefix) + "_p.txt";
-		ofstream out(pair_vis_fn);
-		assert(out.is_open());
-		// Meta information and breakpoints
-		out << "Seq1 length: " << n << ", Seq2 length: " << m << endl;
-		out << "Breakpoints1:" << endl;
-		for (int i: bp_a) out << i << " ";
-		out << endl;
-		out << "Breakpoints2:" << endl;
-		for (int i: bp_b) out << i << " ";
-		out << endl;
-
-		ti = n; tj = m;
-		int last_type = -1;
-		const int TYPE_DEL = 0;
-		const int TYPE_INS = 1;
-		const int TYPE_MAT = 2;
-		const int TYPE_DUP = 3;
-		while (ti > 0 and tj > 0) {
-			const Dp2Cell &t = dp[ti][tj];
-			int type;
-			if (t.pi == ti - 1 and t.pj == tj) {
-				type = TYPE_DEL;
-			} else if (t.pi == ti and t.pj == tj - 1) {
-				type = TYPE_INS;
-			} else if (t.pi == ti - 1 and t.pj == tj - 1) {
-				type = TYPE_MAT;
-			} else {
-				type = TYPE_DUP;
-			}
-			// Do not merge tandem duplications
-			if (type != last_type or type == TYPE_DUP) {
-				out << ti << "\t" << tj << "\t" << type << endl;
-			}
-			last_type = type;
-			ti = t.pi;
-			tj = t.pj;
-		}
-		out << ti << "\t" << tj << "\t" << last_type << endl;
-		out.close();
-	}
+	cout << "Calculation rate [%%]: " << 100.0 * part_size / raw_size << endl;
 }
 
 static vector<int> input_break_points(const char *fn)
@@ -1197,7 +1073,9 @@ void dev_pairwise(const char *fn1, const char *fn2) {
 }
 
 int main(int argc, char *argv[]) {
+	MAX_BAND_WIDTH = atoi(argv[3]);
 	dev_pairwise(argv[1], argv[2]);
+
 	// process_long(argv[1]);
 	return 1;
 
@@ -1259,7 +1137,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	if (argc - optind == 2) {
-		align_with_dups(opt, argv[optind], argv[optind+1]);
+		// align_with_dups(opt, argv[optind], argv[optind+1]);
 	} else {
 		fprintf(stderr, "Two FASTA files are required\n");
 		return 1;
