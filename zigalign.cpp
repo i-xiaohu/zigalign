@@ -897,7 +897,7 @@ void align_with_dups2(const ZigOptions &opt,
 	calc_band = merge_intervals(calc_band);
 	for (int i = 0; i < calc_band.size(); i++) {
 		const Interval &v = calc_band[i];
-		printf("[%d, %d]\n", v.l, v.r);
+		// printf("[%d, %d]\n", v.l, v.r);
 		int l = max(0, v.l);
 		int r = min(q_len, v.r);
 		for (int j = l; j <= r; j++) {
@@ -975,7 +975,90 @@ void align_with_dups2(const ZigOptions &opt,
 	for (int i = 0; i <= t_len; i++) {
 		part_size += dp[i].size();
 	}
+	cout << "Band size: " << bw << endl;
 	cout << "Calculation rate [%%]: " << 100.0 * part_size / raw_size << endl;
+
+	{
+		// sanity check: whole matrix for SI alignment
+		vector<vector<Dp2Cell>> mat;
+		mat.resize(t_len + 1);
+		for (int i = 0; i <= t_len; i++) {
+			mat[i].resize(q_len + 1);
+		}
+		mat[0][0].H = 0;
+		for (int j = 1; j <= q_len; j++) {
+			mat[0][j].F = mat[0][j].H = GAP_O + j * GAP_E;
+		}
+		for (int i = 1; i <= t_len; i++) {
+			mat[i][0].E = mat[i][0].H = GAP_O + i * GAP_E;
+			for (int j = 1; j <= q_len; j++) {
+				mat[i][j].E = max(mat[i-1][j].H + GAP_O, mat[i-1][j].E) + GAP_E;
+				mat[i][j].F = max(mat[i][j-1].H + GAP_O, mat[i][j-1].F) + GAP_E;
+				int M = mat[i-1][j-1].H + (t[i-1] == q[j-1] ? MAT_SCORE : MIS_PEN);
+				if (mat[i][j].E > mat[i][j].H) {
+					mat[i][j].H = mat[i][j].E;
+					mat[i][j].pi = i-1;
+					mat[i][j].pj = j;
+				}
+				if (mat[i][j].F > mat[i][j].H) {
+					mat[i][j].H = mat[i][j].F;
+					mat[i][j].pi = i;
+					mat[i][j].pj = j-1;
+				}
+				if (M > mat[i][j].H) {
+					mat[i][j].H = M;
+					mat[i][j].pi = i-1;
+					mat[i][j].pj = j-1;
+				}
+			}
+		}
+		cout << "Whole alignment score: " << mat[t_len][q_len].H << endl;
+
+		const int TYPE_MAT = 0;
+		const int TYPE_INS = 1;
+		const int TYPE_DEL = 2;
+		int ti = t_len, tj = q_len;
+		int prev_op = -1, cnt = 0;
+		vector<int> op_array, num_array;
+		int optimal_band = 0;
+		while (tj > 0 and tj > 0) {
+			const Dp2Cell &p = mat[ti][tj];
+			optimal_band = max(optimal_band, abs(ti - tj));
+			int curr_op;
+			if (p.pi == ti - 1 and p.pj == tj) {
+				curr_op = TYPE_DEL;
+			} else if (p.pi == ti and p.pj == tj - 1) {
+				curr_op = TYPE_INS;
+			} else if (p.pi == ti - 1 and p.pj == tj - 1) {
+				curr_op = TYPE_MAT;
+			} else {
+				abort();
+			}
+			if (prev_op != -1 and curr_op != prev_op) {
+				op_array.push_back(prev_op);
+				num_array.push_back(cnt);
+				cnt = 0;
+			}
+			prev_op = curr_op;
+			cnt++;
+			ti = p.pi;
+			tj = p.pj;
+		}
+		if (prev_op != -1) {
+			op_array.push_back(prev_op);
+			num_array.push_back(cnt);
+		}
+		if (ti > 0) {
+			op_array.push_back(TYPE_DEL);
+			num_array.push_back(ti);
+		}
+		if (tj > 0) {
+			op_array.push_back(TYPE_INS);
+			num_array.push_back(tj);
+		}
+		cout << "optimal band: " << optimal_band << endl;
+	}
+
 }
 
 static vector<int> input_break_points(const char *fn)
