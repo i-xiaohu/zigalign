@@ -651,6 +651,8 @@ void align_with_dups(const ZigOptions &opt,
 		}
 	}
 
+	cout << "Truth score: " << dp[t_len][q_len].H << endl;
+
 	// CIGAR generation
 	int ti = t_len, tj = q_len;
 	int del_n = 0, ins_n = 0, mat_n = 0, mis_n = 0, dup_n = 0;
@@ -920,12 +922,25 @@ void align_with_dups2(const ZigOptions &opt,
 	int t_pointer = 0;
 	for (int i = 1; i <= t_len; i++) {
 		while (t_pointer < t_bp_intv.size() and t_bp_intv[t_pointer].r < i) t_pointer++;
-		bool in_t_bp = false;
-		if (t_pointer < t_bp_intv.size() and t_bp_intv[t_pointer].l <= i) in_t_bp = true;
+		bool in_t_bp = (t_pointer < t_bp_intv.size() and t_bp_intv[t_pointer].l <= i);
+
 		// Shift the band
 		for (Interval &v: calc_band) {
-			int l = max(0, ++v.l);
-			int r = min(q_len, ++v.r);
+			v.l++;
+			v.r++;
+		}
+		// Add bands of breakpoints
+		if (in_t_bp) {
+			for (const Interval &bp: q_bp_intv) {
+				Interval v{bp.l - bw, bp.r + bw};
+				calc_band.push_back(v);
+			}
+			sort(calc_band.begin(), calc_band.end(), [](const Interval &a, const Interval &b) -> bool { return a.l <= b.l; });
+			calc_band = merge_intervals(calc_band);
+		}
+		for (Interval &v: calc_band) {
+			int l = max(0, v.l);
+			int r = min(q_len, v.r);
 			for (int j = l; j <= r; j++) {
 				Dp3Cell c;
 				c.ci = i;
@@ -933,7 +948,9 @@ void align_with_dups2(const ZigOptions &opt,
 				dp[i].push_back(c);
 			}
 		}
+
 		int mon_j = 0;
+		int q_pointer = 0;
 		for (int j = 0; j < dp[i].size(); j++) {
 			int curr_j = dp[i][j].cj;
 			// Diagonal transfer
@@ -967,9 +984,79 @@ void align_with_dups2(const ZigOptions &opt,
 					dp[i][j].pj = j-1;
 				}
 			}
+
+			while (q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].r < curr_j) q_pointer++;
+			bool in_q_bp = (q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].l <= curr_j);
+			if (in_t_bp and in_q_bp) {
+				if (q_pointer > 0) {
+					// Jump from the last breakpoint kmer
+					int l1 = q_bp_intv[q_pointer-1].l, r1 = q_bp_intv[q_pointer-1].r;
+					int max_score = -INF, max_id = -1;
+					assert(j > 0);
+					int low = 0, high = j-1, ans = -1;
+					while (low <= high) {
+						int mid = (low + high) >> 1;
+						if (dp[i][mid].cj >= l1) {
+							ans = mid;
+							high = mid - 1;
+						} else {
+							low = mid + 1;
+						}
+					}
+					if (ans != -1) {
+						for (int k = ans; k < j; k++) {
+							if (dp[i][k].cj > r1) break;
+							assert(dp[i][k].cj >= l1 and dp[i][k].cj <= r1);
+							int tmp = max(dp[i][k].H + DEL_DUP_O, dp[i][k].B2) + DEL_DUP_E;
+							if (tmp > max_score) {
+								max_score = tmp;
+								max_id = k;
+							}
+						}
+						dp[i][j].B2 = max_score;
+						if (dp[i][j].B2 > dp[i][j].H) {
+							dp[i][j].H = dp[i][j].B2;
+							dp[i][j].pi = i;
+							dp[i][j].pj = max_id;
+						}
+					}
+				}
+
+				if (t_pointer > 0) {
+					int l1 = t_bp_intv[t_pointer-1].l, r1 = t_bp_intv[t_pointer-1].r;
+					int max_score = -INF, max_id = -1;
+					for (int k = l1; k <= r1; k++) {
+						int low = 0, high = j-1, ans = -1;
+						while (low <= high) {
+							int mid = (low + high) >> 1;
+							if (dp[k][mid].cj > curr_j) {
+								high = mid - 1;
+							} else if (dp[k][mid].cj < curr_j) {
+								low = mid + 1;
+							} else {
+								ans = mid;
+								break;
+							}
+						}
+						if (ans != -1) {
+							int tmp = max(dp[k][ans].H + DEL_DUP_O, dp[k][ans].B1) + DEL_DUP_E;
+							if (tmp > max_score) {
+								max_score = tmp;
+								max_id = k;
+							}
+						}
+					}
+					dp[i][j].B1 = max_score;
+					if (dp[i][j].B1 > dp[i][j].H) {
+						dp[i][j].H = dp[i][j].B1;
+						dp[i][j].pi = max_id;
+						dp[i][j].pj = j;
+					}
+				}
+			}
 		}
 	}
-	cout << "SI result " << dp[t_len].back().H << endl;
+	cout << "DSI result " << dp[t_len].back().H << endl;
 	int raw_size = (t_len + 1) * (q_len + 1);
 	int part_size = 0;
 	for (int i = 0; i <= t_len; i++) {
@@ -977,88 +1064,6 @@ void align_with_dups2(const ZigOptions &opt,
 	}
 	cout << "Band size: " << bw << endl;
 	cout << "Calculation rate [%%]: " << 100.0 * part_size / raw_size << endl;
-
-	{
-		// sanity check: whole matrix for SI alignment
-		vector<vector<Dp2Cell>> mat;
-		mat.resize(t_len + 1);
-		for (int i = 0; i <= t_len; i++) {
-			mat[i].resize(q_len + 1);
-		}
-		mat[0][0].H = 0;
-		for (int j = 1; j <= q_len; j++) {
-			mat[0][j].F = mat[0][j].H = GAP_O + j * GAP_E;
-		}
-		for (int i = 1; i <= t_len; i++) {
-			mat[i][0].E = mat[i][0].H = GAP_O + i * GAP_E;
-			for (int j = 1; j <= q_len; j++) {
-				mat[i][j].E = max(mat[i-1][j].H + GAP_O, mat[i-1][j].E) + GAP_E;
-				mat[i][j].F = max(mat[i][j-1].H + GAP_O, mat[i][j-1].F) + GAP_E;
-				int M = mat[i-1][j-1].H + (t[i-1] == q[j-1] ? MAT_SCORE : MIS_PEN);
-				if (mat[i][j].E > mat[i][j].H) {
-					mat[i][j].H = mat[i][j].E;
-					mat[i][j].pi = i-1;
-					mat[i][j].pj = j;
-				}
-				if (mat[i][j].F > mat[i][j].H) {
-					mat[i][j].H = mat[i][j].F;
-					mat[i][j].pi = i;
-					mat[i][j].pj = j-1;
-				}
-				if (M > mat[i][j].H) {
-					mat[i][j].H = M;
-					mat[i][j].pi = i-1;
-					mat[i][j].pj = j-1;
-				}
-			}
-		}
-		cout << "Whole alignment score: " << mat[t_len][q_len].H << endl;
-
-		const int TYPE_MAT = 0;
-		const int TYPE_INS = 1;
-		const int TYPE_DEL = 2;
-		int ti = t_len, tj = q_len;
-		int prev_op = -1, cnt = 0;
-		vector<int> op_array, num_array;
-		int optimal_band = 0;
-		while (tj > 0 and tj > 0) {
-			const Dp2Cell &p = mat[ti][tj];
-			optimal_band = max(optimal_band, abs(ti - tj));
-			int curr_op;
-			if (p.pi == ti - 1 and p.pj == tj) {
-				curr_op = TYPE_DEL;
-			} else if (p.pi == ti and p.pj == tj - 1) {
-				curr_op = TYPE_INS;
-			} else if (p.pi == ti - 1 and p.pj == tj - 1) {
-				curr_op = TYPE_MAT;
-			} else {
-				abort();
-			}
-			if (prev_op != -1 and curr_op != prev_op) {
-				op_array.push_back(prev_op);
-				num_array.push_back(cnt);
-				cnt = 0;
-			}
-			prev_op = curr_op;
-			cnt++;
-			ti = p.pi;
-			tj = p.pj;
-		}
-		if (prev_op != -1) {
-			op_array.push_back(prev_op);
-			num_array.push_back(cnt);
-		}
-		if (ti > 0) {
-			op_array.push_back(TYPE_DEL);
-			num_array.push_back(ti);
-		}
-		if (tj > 0) {
-			op_array.push_back(TYPE_INS);
-			num_array.push_back(tj);
-		}
-		cout << "optimal band: " << optimal_band << endl;
-	}
-
 }
 
 static vector<int> input_break_points(const char *fn)
@@ -1153,6 +1158,7 @@ void dev_pairwise(const char *fn1, const char *fn2) {
 	vector<int> q_bp = self_alignment(opt, q_len, q, "test/dev2.txt");
 
 	align_with_dups2(opt, t_len, t, t_bp, q_len, q, q_bp);
+	align_with_dups(opt, t_len, t, t_bp, q_len, q, q_bp);
 }
 
 int main(int argc, char *argv[]) {
