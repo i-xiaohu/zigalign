@@ -19,7 +19,7 @@ using namespace std;
 
 // Zigalign parameters
 struct ZigOptions {
-	// Scoring matrix for non-repeat regions
+	// SI Scoring matrix
 	int mat_score;
 	int mis_pen;
 	int gap_o;
@@ -43,12 +43,11 @@ struct ZigOptions {
 	const char *vis_prefix;
 
 	ZigOptions() {
-		// Scoring matrix for SI model
+		// Scoring parameters should be adjusted by duplication and variation rate
 		mat_score = 1;
-		mis_pen = -4;
-		gap_o = -6;
-		gap_e = -1;
-		// Scoring matrix for DSI model should be adjusted by duplication and variation rate
+		mis_pen = -12; // Increased penalty for small variants, i.e., duplication indels are preferred.
+		gap_o = -18;
+		gap_e = -3;
 		min_unit_size = 5;
 		tr_mat_score = 2;
 		tr_mis_pen = -3;
@@ -58,7 +57,7 @@ struct ZigOptions {
 		close_tr_pen = -6;
 		del_dup_o = -6;
 		del_dup_e = -2;
-		band_width = 300;
+		band_width = 50;
 		vis_prefix = nullptr;
 	}
 };
@@ -128,6 +127,10 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 	const int TR_MIS_PEN = o.tr_mis_pen;
 	const int TR_GAP_O = o.tr_gap_o;
 	const int TR_GAP_E = o.tr_gap_e;
+
+	if (MAT_SCORE >= TR_MAT_SCORE) {
+		fprintf(stderr, "Warning: setting higher score for diagonal match can't detect tandem repeats\n");
+	}
 
 	// TODO: reduce memory consumption
 	vector<vector<Dp1Cell>> dp;
@@ -511,7 +514,7 @@ struct Dp2Cell {
 	}
 };
 
-void align_with_dups(const ZigOptions &opt,
+vector<int> align_with_dups(const ZigOptions &opt,
 	int t_len, const char *t, const vector<int> &t_bp,
 	int q_len, const char *q, const vector<int> &q_bp)
 {
@@ -584,6 +587,25 @@ void align_with_dups(const ZigOptions &opt,
 
 		int q_pointer = 0;
 		for (int j = 1; j <= q_len; j++) {
+			int M = dp[i-1][j-1].H + (t[i-1] == q[j-1] ? MAT_SCORE : MIS_PEN);
+			if (M > dp[i][j].H) {
+				dp[i][j].H = M;
+				dp[i][j].pi = i-1;
+				dp[i][j].pj = j-1;
+			}
+			dp[i][j].E = max(dp[i-1][j].H + GAP_O, dp[i-1][j].E) + GAP_E;
+			if (dp[i][j].E > dp[i][j].H) {
+				dp[i][j].H = dp[i][j].E;
+				dp[i][j].pi = i-1;
+				dp[i][j].pj = j;
+			}
+			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
+			if (dp[i][j].F > dp[i][j].H) {
+				dp[i][j].H = dp[i][j].F;
+				dp[i][j].pi = i;
+				dp[i][j].pj = j-1;
+			}
+
 			while (q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].r < j) q_pointer++;
 			bool in_q_bp = false;
 			if (q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].l <= j) in_q_bp = true;
@@ -628,25 +650,6 @@ void align_with_dups(const ZigOptions &opt,
 						dp[i][j].pj = j;
 					}
 				}
-			}
-
-			dp[i][j].E = max(dp[i-1][j].H + GAP_O, dp[i-1][j].E) + GAP_E;
-			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
-			int M = dp[i-1][j-1].H + (t[i-1] == q[j-1] ? MAT_SCORE : MIS_PEN);
-			if (dp[i][j].E > dp[i][j].H) {
-				dp[i][j].H = dp[i][j].E;
-				dp[i][j].pi = i-1;
-				dp[i][j].pj = j;
-			}
-			if (dp[i][j].F > dp[i][j].H) {
-				dp[i][j].H = dp[i][j].F;
-				dp[i][j].pi = i;
-				dp[i][j].pj = j-1;
-			}
-			if (M > dp[i][j].H) {
-				dp[i][j].H = M;
-				dp[i][j].pi = i-1;
-				dp[i][j].pj = j-1;
 			}
 		}
 	}
@@ -797,6 +800,7 @@ void align_with_dups(const ZigOptions &opt,
 		out << ti << "\t" << tj << "\t" << last_type << endl;
 		out.close();
 	}
+	return cv;
 }
 
 struct Dp3Cell {
@@ -832,7 +836,7 @@ vector<Interval> merge_intervals(const vector<Interval> &v) {
 
 int MAX_BAND_WIDTH = 100;
 
-void align_with_dups2(const ZigOptions &opt,
+vector<int> align_with_dups2(const ZigOptions &opt,
 	int t_len, const char *t, const vector<int> &t_bp,
 	int q_len, const char *q, const vector<int> &q_bp)
 {
@@ -1004,6 +1008,7 @@ void align_with_dups2(const ZigOptions &opt,
 							low = mid + 1;
 						}
 					}
+					assert(ans != -1);
 					if (ans != -1) {
 						assert(dp[i][ans].cj == l1);
 						for (int k = ans; k < j; k++) {
@@ -1026,7 +1031,7 @@ void align_with_dups2(const ZigOptions &opt,
 
 				if (t_pointer > 0) {
 					int l1 = t_bp_intv[t_pointer-1].l, r1 = t_bp_intv[t_pointer-1].r;
-					int max_score = -INF, max_id = -1;
+					int max_score = -INF, max_id = -1, mate_id;
 					for (int k = l1; k <= r1; k++) {
 						int low = 0, high = dp[k].size()-1, ans = -1;
 						while (low <= high) {
@@ -1046,6 +1051,7 @@ void align_with_dups2(const ZigOptions &opt,
 							if (tmp > max_score) {
 								max_score = tmp;
 								max_id = k;
+								mate_id = ans;
 							}
 						}
 					}
@@ -1053,20 +1059,128 @@ void align_with_dups2(const ZigOptions &opt,
 					if (dp[i][j].B1 > dp[i][j].H) {
 						dp[i][j].H = dp[i][j].B1;
 						dp[i][j].pi = max_id;
-						dp[i][j].pj = j;
+						dp[i][j].pj = mate_id;
 					}
 				}
 			}
 		}
 	}
-	cout << "DSI result " << dp[t_len].back().H << endl;
+	cout << "DSI result: " << dp[t_len].back().H << endl;
 	int raw_size = (t_len + 1) * (q_len + 1);
 	int part_size = 0;
 	for (int i = 0; i <= t_len; i++) {
 		part_size += dp[i].size();
 	}
 	cout << "Band size: " << bw << endl;
-	cout << "Calculation rate [%%]: " << 100.0 * part_size / raw_size << endl;
+	cout << "Calculation rate [%]: " << 100.0 * part_size / raw_size << endl;
+
+	// CIGAR generation
+	int ti = t_len, tj = dp[t_len].size()-1;
+	int ci = dp[ti][tj].ci, cj = dp[ti][tj].cj;
+	assert(ci == t_len and cj == q_len);
+	int del_n = 0, ins_n = 0, mat_n = 0, mis_n = 0, dup_n = 0;
+	vector<int> cv;
+	// All operations occur on target sequence _t_
+	const int COP_M = 0;
+	const int COP_I = 1;
+	const int COP_D = 2;
+	const int DUP_I = 3;
+	const int DUP_D = 4;
+	const string OP_CHAR = "MIDID";
+	int op_type = -1, last_op = -1, op_cnt = 0;
+	string ext_t, ext_q;
+	while (ti > 0 and tj > 0) {
+		const Dp3Cell &p = dp[ti][tj];
+		assert(p.pi != -1 and p.pj != -1);
+		const Dp3Cell &g = dp[p.pi][p.pj];
+		int pi = g.ci, pj = g.cj;
+		if (pi == ci - 1 and pj == cj) { // Deletion from _t_
+			op_type = COP_D;
+			del_n++;
+			ext_t += t[ci-1];
+			ext_q += '-';
+		} else if (pi == ci and pj == cj - 1) { // Insertion into _t_
+			op_type = COP_I;
+			ins_n++;
+			ext_t += '-';
+			ext_q += q[cj-1];
+		} else if (pi == ci - 1 and pj == cj - 1) { // Match/Mismatch
+			op_type = COP_M;
+			if (t[ci-1] == q[cj-1]) mat_n++;
+			else mis_n++;
+			ext_t += t[ci-1];
+			ext_q += q[cj-1];
+		} else {
+			if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
+//			fprintf(stderr, "%d %d -> %d %d\n", ti, tj, t.pi, t.pj);
+			if (ci == pi) { // Duplication insertion into _t_
+				op_type = DUP_I;
+				op_cnt = cj - pj;
+				for (int j = cj; j > pj; j--) {
+					ext_t += '+';
+					ext_q += q[j-1];
+				}
+			} else { // Duplication deletion from _t_
+				op_type = DUP_D;
+				op_cnt = ci - pi;
+				for (int i = ci; i > pi; i--) {
+					ext_t += t[i-1];
+					ext_q += '+';
+				}
+			}
+
+			cv.push_back(op_cnt << 4 | op_type); // Do not merge duplication indels
+			dup_n++;
+			op_type = last_op = -1;
+			op_cnt = -1;
+		}
+		// Merge match/mismatch/indels
+		if (last_op != -1 and op_type != last_op) {
+			cv.push_back(op_cnt << 4 | last_op);
+			op_cnt = 0;
+		}
+		last_op = op_type;
+		op_cnt++;
+		ti = p.pi;
+		tj = p.pj;
+		ci = g.ci;
+		cj = g.cj;
+	}
+	if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
+	// cout << ti << "\t" << tj << endl;
+	if (ti > 0) {
+		cv.push_back(ci << 4 | COP_D);
+	}
+	if (tj > 0) {
+		cv.push_back(cj << 4 | COP_I);
+	}
+	reverse(cv.begin(), cv.end());
+	reverse(ext_t.begin(), ext_t.end());
+	reverse(ext_q.begin(), ext_q.end());
+	fprintf(stderr, "%d deletions, %d insertions, %d matches, %d mismatches and %d duplication indels\n", del_n, ins_n, mat_n, mis_n, dup_n);
+
+	if (1) {
+		if (DEBUG) {
+			fprintf(stderr, "%s\n", ext_t.data());
+			fprintf(stderr, "%s\n", ext_q.data());
+		}
+		string non_t, non_q;
+		for (char c: ext_t) {
+			if (c != '-' and c != '+') {
+				non_t += c;
+			}
+		}
+		for (char c: ext_q) {
+			if (c != '-' and c != '+') {
+				non_q += c;
+			}
+		}
+		assert(non_t.length() == t_len);
+		assert(non_t == string(t));
+		assert(non_q.length() == q_len);
+		assert(non_q == string(q));
+	}
+	return cv;
 }
 
 static vector<int> input_break_points(const char *fn)
@@ -1160,8 +1274,14 @@ void dev_pairwise(const char *fn1, const char *fn2) {
 	vector<int> t_bp = self_alignment(opt, t_len, t, "test/dev1.txt");
 	vector<int> q_bp = self_alignment(opt, q_len, q, "test/dev2.txt");
 
-	align_with_dups2(opt, t_len, t, t_bp, q_len, q, q_bp);
-	align_with_dups(opt, t_len, t, t_bp, q_len, q, q_bp);
+	vector<int> cv2 = align_with_dups2(opt, t_len, t, t_bp, q_len, q, q_bp);
+	vector<int> cv = align_with_dups(opt, t_len, t, t_bp, q_len, q, q_bp);
+	assert(cv.size() == cv2.size());
+	for (int i = 0; i < cv.size(); i++) {
+		// printf("%d %d vs %d %d\n", cv[i] & 15, cv[i] >> 4, cv2[i] & 15, cv2[i] >> 4);
+		// It is okay that CIGARs are different as long as the scores are the same
+		assert(cv[i] == cv2[i]);
+	}
 }
 
 int main(int argc, char *argv[]) {

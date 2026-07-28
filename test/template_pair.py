@@ -55,14 +55,17 @@ def work(prefix: str):
     # Generate two different sets of units to delete
     deleted1 = sorted(random.sample(range(0, copy_n+1), delete_n))
     deleted2 = sorted(random.sample(range(0, copy_n+1), delete_n))
-    print('Seq1 deletes', deleted1)
-    print('Seq2 deletes', deleted2)
     units1, units2 = [], []
+    kept1, kept2 = [], []
     for i in range(copy_n):
         if not (i in deleted1):
             units1.append(all_units[i])
+            kept1.append(i)
         if not (i in deleted2):
             units2.append(all_units[i])
+            kept2.append(i)
+    print('Seq1 keeps', kept1)
+    print('Seq2 keeps', kept2)
     flank_l = gen_template(300)
     flank_r = gen_template(300)
     seq1 = flank_l + ''.join(units1) + flank_r
@@ -85,11 +88,17 @@ def work(prefix: str):
             marker1[i] = False
         if i in deleted2:
             marker2[i] = False
+    print('300M', end=' ')
     for i in range(copy_n):
-        if marker1[i] and not marker2[i]:
-            print('Seq2 deleted %d' % i)
-        elif not marker1[i] and marker2[i]:
-            print('Seq1 deleted %d' % i)
+        if marker1[i]:
+            if marker2[i]:
+                print("200M", end=' ')
+            else:
+                print("200D", end=' ')
+        else:
+            if marker2[i]:
+                print("200I", end=' ')
+    print('300M')
 
 
 if __name__ == '__main__':
