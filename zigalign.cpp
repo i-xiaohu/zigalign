@@ -164,23 +164,30 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, const cha
 	for (int i = 0; i <= n; i++) {
 		bt[i].resize(i + 1);
 	}
+
+	// Initialization
 	prev_dp[0].H = 0;
 	prev_dp[0].beg = 1;
 	for (int i = 1; i <= MIN_UNIT; i++) {
 		bt[i][i].event = NORMAL;
 		bt[i][i].pi = 1;
-		bt[i][i].pj = i;
+		bt[i][i].pj = i-1;
 	}
 	prev_dp[MIN_UNIT].H = MIN_UNIT * MAT_SCORE;
 	prev_dp[MIN_UNIT].beg = 1;
 
+	// Main loop
 	for (int i = MIN_UNIT + 1; i <= n; i++) {
-		for (int j = 0; j <= i; j++) {
-			curr_dp[j] = Dp4Cell();
-		}
+		for (int j = 0; j <= i; j++) curr_dp[j] = Dp4Cell();
+		curr_dp[i].H = prev_dp[i-1].H + MAT_SCORE;
+		bt[i][i].event = NORMAL;
+		bt[i][i].pi = 1;
+		bt[i][i].pj = i-1;
+		curr_dp[i].beg = prev_dp[i-1].beg;
 
-		int main_diagonal = i * MAT_SCORE;
+		int main_diagonal = (i-1) * MAT_SCORE;
 		int max_value = main_diagonal; // From non-repetitive region
+		max_value = prev_dp[i-1].H;
 		int t_beg = prev_dp[i-1].beg; // To prevent illegal path
 		int t_end = i - 1;
 		uint8_t event = START_REP;
@@ -274,6 +281,7 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, const cha
 	}
 
 	printf("score = %d\n", prev_dp[n].H);
+	fprintf(stderr, "%.3f CPU seconds\n", cputime() - ctime);
 }
 
 // Stage 1: identify breakpoints of tandem repeats using self alignment
@@ -453,6 +461,7 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 	}
 
 	cout << dp[n][n].H << endl;
+	cout << dp[n][n].dh << endl;
 
 	if (not vis_fn.empty()) {
 		ofstream out(vis_fn);
@@ -1444,20 +1453,20 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2) {
 	}
 }
 
-void test(const char *fn1) {
+void test(const char *fn1, int m) {
 	pair<string, string> pair1 = input_fasta_seq(fn1);
 	string name1 = pair1.first, seq1 = pair1.second;
 	int t_len = seq1.length();
 	const char *t = seq1.data();
 
 	ZigOptions opt;
-	int n = 4000;
+	int n = min(t_len, m);
 	self_alignment(opt, n, t, "");
 	self_alignment2(opt, n, t);
 }
 
 int main(int argc, char *argv[]) {
-	test(argv[1]);
+	test(argv[1], atoi(argv[2]));
 	return 1;
 
 	double ctime = cputime(), rtime = realtime();
