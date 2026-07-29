@@ -514,7 +514,7 @@ struct Dp2Cell {
 	}
 };
 
-vector<int> align_with_dups(const ZigOptions &opt,
+vector<int> global_pairwise(const ZigOptions &opt,
 	int t_len, const char *t, const vector<int> &t_bp,
 	int q_len, const char *q, const vector<int> &q_bp)
 {
@@ -618,7 +618,7 @@ vector<int> align_with_dups(const ZigOptions &opt,
 					// Jump from the last breakpoint kmer
 					int l1 = q_bp_intv[q_pointer-1].l, r1 = q_bp_intv[q_pointer-1].r;
 					int max_score = -INF, max_id = -1;
-					// Redundant caculation
+					// Redundant calculation
 					for (int k = l1; k <= r1; k++) {
 						int tmp = max(dp[i][k].H + DEL_DUP_O, dp[i][k].B2) + DEL_DUP_E;
 						if (tmp > max_score) {
@@ -654,7 +654,7 @@ vector<int> align_with_dups(const ZigOptions &opt,
 		}
 	}
 
-	cout << "Truth score: " << dp[t_len][q_len].H << endl;
+	cout << "DIS alignment score: " << dp[t_len][q_len].H << endl;
 
 	// CIGAR generation
 	int ti = t_len, tj = q_len;
@@ -758,8 +758,8 @@ vector<int> align_with_dups(const ZigOptions &opt,
 		assert(non_q == string(q));
 	}
 
-	if (1) {
-		string pair_vis_fn = "test/dev_p.txt";
+	if (opt.vis_prefix) {
+		string pair_vis_fn = string(opt.vis_prefix) + "_p.txt";
 		ofstream out(pair_vis_fn);
 		assert(out.is_open());
 		// Meta information and breakpoints
@@ -834,9 +834,7 @@ vector<Interval> merge_intervals(const vector<Interval> &v) {
 	return ret;
 }
 
-int MAX_BAND_WIDTH = 100;
-
-vector<int> align_with_dups2(const ZigOptions &opt,
+vector<int> banded_pairwise(const ZigOptions &opt,
 	int t_len, const char *t, const vector<int> &t_bp,
 	int q_len, const char *q, const vector<int> &q_bp)
 {
@@ -882,7 +880,7 @@ vector<int> align_with_dups2(const ZigOptions &opt,
 	const int DEL_DUP_O = opt.del_dup_o;
 	const int DEL_DUP_E = opt.del_dup_e;
 
-	int bw = MAX_BAND_WIDTH; // Bandwidth
+	const int bw = opt.band_width; // Bandwidth
 	vector<vector<Dp3Cell>> dp;
 	dp.resize(t_len + 1);
 
@@ -1065,12 +1063,12 @@ vector<int> align_with_dups2(const ZigOptions &opt,
 			}
 		}
 	}
-	cout << "DSI result: " << dp[t_len].back().H << endl;
-	int raw_size = (t_len + 1) * (q_len + 1);
-	int part_size = 0;
+	long raw_size = (long)(t_len + 1) * (q_len + 1);
+	long part_size = 0;
 	for (int i = 0; i <= t_len; i++) {
 		part_size += dp[i].size();
 	}
+	cout << "DSI alignment score: " << dp[t_len].back().H << endl;
 	cout << "Band size: " << bw << endl;
 	cout << "Calculation rate [%]: " << 100.0 * part_size / raw_size << endl;
 
@@ -1222,18 +1220,11 @@ int usage(const ZigOptions &o) {
 	return 1;
 }
 
-void process_long(const char *fn) {
-	pair<string, string> pair = input_fasta_seq(fn);
-	cout << pair.first << endl;
-	cout << pair.second.length() << endl;
-	const char *seq = pair.second.data();
-	int n = pair.second.length();
-
+// FIXME: the stitching is inaccurate
+vector<int> process_long(const ZigOptions &opt, int n, const char *seq) {
 	// NOTE: I got different results from n = 20000; n might affect the accuracy of breakpoints
 	// NOTE: serial execution because of cyclic repeats
 	const int part_len = 40000;
-	ZigOptions opt;
-	opt.close_tr_pen = -15; // It will increase the continuity of zigzag lines
 
 	vector<int> all_bps;
 	all_bps.push_back(0);
@@ -1241,9 +1232,9 @@ void process_long(const char *fn) {
 	int cnt = 0;
 	while (offset < n) {
 		int len = min(n - offset, part_len);
-		fprintf(stderr, "offset=%d, length=%d\n", offset, len);
-		string vis_fn = "pairwise/hors/hor" + to_string(++cnt) + ".txt";
-		vector<int> bps = self_alignment(opt, len, seq + offset, vis_fn);
+		// fprintf(stderr, "offset=%d, length=%d\n", offset, len);
+		// string vis_fn = "pairwise/hors/hor" + to_string(++cnt) + ".txt";
+		vector<int> bps = self_alignment(opt, len, seq + offset, "");
 		for (int i = 1; i < bps.size(); i++) {
 			all_bps.push_back(bps[i] + offset);
 		}
@@ -1255,42 +1246,39 @@ void process_long(const char *fn) {
 			offset += len;
 		}
 	}
-	fprintf(stdout, "Stitched %ld breakpoints\n", all_bps.size());
-	for (int b: all_bps) {
-		fprintf(stdout, "%d ", b);
-	}
-	fprintf(stdout, "\n");
+	fprintf(stderr, "Stitched %ld breakpoints\n", all_bps.size());
+	return all_bps;
 }
 
-void dev_pairwise(const char *fn1, const char *fn2) {
+const int MAX_SEQ_LEN = 40000;
+void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2) {
 	pair<string, string> pair1 = input_fasta_seq(fn1);
 	pair<string, string> pair2 = input_fasta_seq(fn2);
 	string name1 = pair1.first, seq1 = pair1.second;
 	string name2 = pair2.first, seq2 = pair2.second;
 	int t_len = seq1.length(), q_len = seq2.length();
-	cout << t_len << "\t" << q_len << endl;
 	const char *t = seq1.data(), *q = seq2.data();
-	ZigOptions opt;
-	vector<int> t_bp = self_alignment(opt, t_len, t, "test/dev1.txt");
-	vector<int> q_bp = self_alignment(opt, q_len, q, "test/dev2.txt");
-
-	vector<int> cv2 = align_with_dups2(opt, t_len, t, t_bp, q_len, q, q_bp);
-	vector<int> cv = align_with_dups(opt, t_len, t, t_bp, q_len, q, q_bp);
-	assert(cv.size() == cv2.size());
-	for (int i = 0; i < cv.size(); i++) {
-		// printf("%d %d vs %d %d\n", cv[i] & 15, cv[i] >> 4, cv2[i] & 15, cv2[i] >> 4);
-		// It is okay that CIGARs are different as long as the scores are the same
-		assert(cv[i] == cv2[i]);
+	if (t_len > MAX_SEQ_LEN or q_len > MAX_SEQ_LEN) {
+		vector<int> t_bp = (t_len > MAX_SEQ_LEN) ?process_long(opt, t_len, t) :self_alignment(opt, t_len, t, "");
+		vector<int> q_bp = (q_len > MAX_SEQ_LEN) ?process_long(opt, q_len, q) :self_alignment(opt, q_len, q, "");
+		// It is slow because the partial matrix is still large
+		vector<int> cv2 = banded_pairwise(opt, t_len, t, t_bp, q_len, q, q_bp);
+		paf_format(name2, seq2, name1, seq1, cv2);
+	} else {
+		// banded_pairwise(opt, t_len, t, q_len, q);
+		string t_vis_fn = "", q_vis_fn = "";
+		if (opt.vis_prefix) {
+			t_vis_fn = string(opt.vis_prefix) + "_s1.txt";
+			q_vis_fn = string(opt.vis_prefix) + "_s2.txt";
+		}
+		vector<int> t_bp = self_alignment(opt, t_len, t, t_vis_fn);
+		vector<int> q_bp = self_alignment(opt, q_len, q, q_vis_fn);
+		vector<int> cv2 = banded_pairwise(opt, t_len, t, t_bp, q_len, q, q_bp);
+		paf_format(name2, seq2, name1, seq1, cv2);
 	}
 }
 
 int main(int argc, char *argv[]) {
-	MAX_BAND_WIDTH = atoi(argv[3]);
-	dev_pairwise(argv[1], argv[2]);
-
-	// process_long(argv[1]);
-	return 1;
-
 	double ctime = cputime(), rtime = realtime();
 	ZigOptions opt;
 	if (argc == 1) return usage(opt);
@@ -1349,7 +1337,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	if (argc - optind == 2) {
-		// align_with_dups(opt, argv[optind], argv[optind+1]);
+		align_with_dups(opt, argv[optind], argv[optind+1]);
 	} else {
 		fprintf(stderr, "Two FASTA files are required\n");
 		return 1;
