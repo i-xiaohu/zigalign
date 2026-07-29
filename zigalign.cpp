@@ -63,6 +63,8 @@ struct ZigOptions {
 };
 
 const int INF = 100000000;
+
+// Move them to code block
 const int NORMAL = 0;
 const int START_REP = 1;
 const int NEW_COPY = 2;
@@ -89,6 +91,27 @@ struct Dp1Cell {
 	}
 };
 
+struct Dp4Cell {
+	int D, E, F, H; // D: score for duplication events
+	int beg, end; // The range of duplication or new copy
+	Dp4Cell() {
+		D = E = F = H = -INF;
+		beg = end = -1;
+	}
+};
+
+// Compact structure for backtrace
+struct Bt1cell {
+	uint8_t event;
+	uint8_t pi;
+	uint16_t pj;
+	Bt1cell() {
+		event = -1;
+		pi = -1;
+		pj = -1;
+	}
+};
+
 struct RepUnit {
 	int tb, te; // 1-based
 	int qb, qe; // [qb, qe) is a tandem repeat of [tb, te)
@@ -111,6 +134,147 @@ struct TandemRepeat {
 	Interval temp; // Templates
 	vector<Interval> units;
 };
+
+const uint16_t SA_MAX_LEN = 50000;
+
+void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, const char *vis_fn = nullptr) {
+	if (n > SA_MAX_LEN) {
+		fprintf(stderr, "Sequence length %d exceeds the limit of self alignment %d\n", n, SA_MAX_LEN);
+		abort();
+	}
+
+	double ctime = cputime();
+	const int MAT_SCORE = o.mat_score;
+	const uint16_t MIN_UNIT = o.min_unit_size;
+	const int OPEN_TR = o.open_tr_pen;
+	const int CLOSE_TR = o.close_tr_pen;
+	const int TR_MAT_SCORE = o.tr_mat_score;
+	const int TR_MIS_PEN = o.tr_mis_pen;
+	const int TR_GAP_O = o.tr_gap_o;
+	const int TR_GAP_E = o.tr_gap_e;
+
+	if (MAT_SCORE >= TR_MAT_SCORE) {
+		fprintf(stderr, "Warning: setting higher score for diagonal match can't detect tandem repeats\n");
+	}
+
+	// Memory allocation
+	vector<Dp4Cell> prev_dp(n + 1);
+	vector<Dp4Cell> curr_dp(n + 1);
+	vector<vector<Bt1cell>> bt(n + 1);
+	for (int i = 0; i <= n; i++) {
+		bt[i].resize(i + 1);
+	}
+	prev_dp[0].H = 0;
+	prev_dp[0].beg = 1;
+	for (int i = 1; i <= MIN_UNIT; i++) {
+		bt[i][i].event = NORMAL;
+		bt[i][i].pi = 1;
+		bt[i][i].pj = i;
+	}
+	prev_dp[MIN_UNIT].H = MIN_UNIT * MAT_SCORE;
+	prev_dp[MIN_UNIT].beg = 1;
+
+	for (int i = MIN_UNIT + 1; i <= n; i++) {
+		for (int j = 0; j <= i; j++) {
+			curr_dp[j] = Dp4Cell();
+		}
+
+		int main_diagonal = i * MAT_SCORE;
+		int max_value = main_diagonal; // From non-repetitive region
+		int t_beg = prev_dp[i-1].beg; // To prevent illegal path
+		int t_end = i - 1;
+		uint8_t event = START_REP;
+		for (int j = 1; j < i-1; j++) {
+			// Start new copy at the end of duplications
+			if (prev_dp[j].end == j and prev_dp[j].H > max_value) {
+				max_value = prev_dp[j].H;
+				t_beg = prev_dp[j].beg;
+				t_end = j;
+				event = NEW_COPY;
+			}
+		}
+		assert(t_beg > 0);
+
+		// D transfer
+		for (int j = t_beg; j <= t_end - MIN_UNIT + 1; j++) {
+			int tmp = (seq[i-1] == seq[j-1]) ? TR_MAT_SCORE : TR_MIS_PEN;
+			int pen = (event == START_REP) ? OPEN_TR : 0; // No penalty for new copy
+			curr_dp[j].D = max_value + tmp + pen;
+			curr_dp[j].beg = j;
+			curr_dp[j].end = t_end;
+			bt[i][j].event = event;
+			bt[i][j].pi = 1;
+			bt[i][j].pj = t_end;
+		}
+
+		// Sub matrix of repetition
+		for (int j = 1; j < i; j++) {
+			int v_score = -INF, h_score = -INF, d_score = -INF;
+			if (j >= prev_dp[j].beg and j <= prev_dp[j].end) {
+				v_score = max(max(prev_dp[j].D, prev_dp[j].H) + TR_GAP_O, prev_dp[j].E) + TR_GAP_E;
+				curr_dp[j].E = v_score;
+			}
+			if (j >= curr_dp[j-1].beg and j <= curr_dp[j-1].end) {
+				h_score = max(max(curr_dp[j-1].D, curr_dp[j-1].H) + TR_GAP_O, curr_dp[j-1].F) + TR_GAP_E;
+				curr_dp[j].F = h_score;
+			}
+			if (j >= prev_dp[j-1].beg and j <= prev_dp[j-1].end) {
+				int tmp = (seq[i-1] == seq[j-1] ? TR_MAT_SCORE : TR_MIS_PEN);
+				d_score = max(prev_dp[j-1].D, prev_dp[j-1].H) + tmp;
+			}
+
+			// Here, >= prefers continue an existing copy, so it can generate longer tandem repeats
+			if (v_score >= curr_dp[j].D and v_score > curr_dp[j].H) {
+				curr_dp[j].H = v_score;
+				curr_dp[j].beg = prev_dp[j].beg;
+				curr_dp[j].end = prev_dp[j].end;
+				bt[i][j].event = WITHIN_REP;
+				bt[i][j].pi = 1;
+				bt[i][j].pj = j;
+			}
+			if (h_score >= curr_dp[j].D and h_score > curr_dp[j].H) {
+				curr_dp[j].H = h_score;
+				curr_dp[j].beg = curr_dp[j-1].beg;
+				curr_dp[j].end = curr_dp[j-1].end;
+				bt[i][j].event = WITHIN_REP;
+				bt[i][j].pi = 0;
+				bt[i][j].pj = j-1;
+			}
+			if (d_score >= curr_dp[j].D and d_score > curr_dp[j].H) {
+				curr_dp[j].H = d_score;
+				curr_dp[j].beg = prev_dp[j-1].beg;
+				curr_dp[j].end = prev_dp[j-1].end;
+				bt[i][j].event = WITHIN_REP;
+				bt[i][j].pi = 1;
+				bt[i][j].pj = j-1;
+			}
+		}
+
+		// B transfer
+		max_value = -INF;
+		t_beg = -1;
+		t_end = -1;
+		for (int j = 1; j < i; j++) {
+			// Only return to diagonal if sub-matrix reaches the lower-right corner
+			if (curr_dp[j].H > max_value and curr_dp[j].end == j) {
+				max_value = curr_dp[j].H;
+				t_beg = curr_dp[j].beg;
+				t_end = curr_dp[j].end;
+			}
+		}
+		if (max_value + CLOSE_TR > curr_dp[i].H) {
+			curr_dp[i].H = max_value + CLOSE_TR;
+			curr_dp[i].beg = t_beg; // This variable is reused to prevent illegal path
+			bt[i][i].event = END_REP;
+			bt[i][i].pi = 0;
+			bt[i][i].pj = t_end;
+		}
+
+		swap(prev_dp, curr_dp);
+	}
+
+	printf("score = %d\n", prev_dp[n].H);
+}
 
 // Stage 1: identify breakpoints of tandem repeats using self alignment
 static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, const string &vis_fn)
@@ -287,6 +451,8 @@ static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, c
 			dp[i][i].event = END_REP;
 		}
 	}
+
+	cout << dp[n][n].H << endl;
 
 	if (not vis_fn.empty()) {
 		ofstream out(vis_fn);
@@ -1278,7 +1444,22 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2) {
 	}
 }
 
+void test(const char *fn1) {
+	pair<string, string> pair1 = input_fasta_seq(fn1);
+	string name1 = pair1.first, seq1 = pair1.second;
+	int t_len = seq1.length();
+	const char *t = seq1.data();
+
+	ZigOptions opt;
+	int n = 4000;
+	self_alignment(opt, n, t, "");
+	self_alignment2(opt, n, t);
+}
+
 int main(int argc, char *argv[]) {
+	test(argv[1]);
+	return 1;
+
 	double ctime = cputime(), rtime = realtime();
 	ZigOptions opt;
 	if (argc == 1) return usage(opt);
