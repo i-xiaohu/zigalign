@@ -113,16 +113,21 @@ struct Bt1cell {
 };
 
 struct RepUnit {
-	int tb, te; // 1-based
-	int qb, qe; // [qb, qe) is a tandem repeat of [tb, te)
-	int score; // Alignment score
+	int qb, qe; // [qb, qe) is a copy of [tb, te)
 	int match, mis, gap;
 
 	RepUnit() {
-		tb = te = 0;
 		qb = qe = 0;
-		score = -INF;
 		match = mis = gap = 0;
+	}
+};
+
+struct TandemGroup {
+	int tb, te; // [tb, te) is the template
+	vector<RepUnit> units;
+
+	TandemGroup() {
+		tb = te = 0;
 	}
 };
 
@@ -137,7 +142,7 @@ struct TandemRepeat {
 
 const uint16_t SA_MAX_LEN = 50000;
 
-vector<int> self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, const char *vis_fn = nullptr)
+vector<int> self_alignment(const ZigOptions &o, uint16_t n, const char *seq, const string &vis_fn = "")
 {
 	if (n > SA_MAX_LEN) {
 		fprintf(stderr, "Sequence length %d exceeds the limit of self alignment %d\n", n, SA_MAX_LEN);
@@ -281,7 +286,7 @@ vector<int> self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, co
 	printf("score = %d\n", prev_dp[n].H);
 	fprintf(stderr, "%.3f CPU seconds\n", cputime() - ctime);
 
-	if (vis_fn) {
+	if (not vis_fn.empty()) {
 		ofstream out(vis_fn);
 		assert(out.is_open());
 		int ti = n, tj = n, te = -1;
@@ -300,21 +305,18 @@ vector<int> self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, co
 
 	// Trace back the optimal path to find tandem repeats
 	int ti = n, tj = n;
-	vector<TandemRepeat> tr_array;
+	vector<TandemGroup> groups;
 	while (ti > 0 and tj > 0) {
 		Bt1cell &t = bt[ti][tj];
 		if (t.event == END_REP) {
 			assert(ti == tj); // Only main diagonal closes repetitions
-			TandemRepeat group;
+			TandemGroup g;
 			while (t.event != START_REP) {
 				ti = t.pi == 1 ?ti-1 :ti;
 				tj = t.pj;
 				t = bt[ti][tj]; // Lower-right corner of the sub-matrix
-				Interval intv;
-				intv.r = ti + 1;
 				RepUnit u;
 				u.qe = ti + 1;
-				u.te = tj + 1;
 				while (t.event != NEW_COPY and t.event != START_REP) {
 					if (t.pi == 1 and tj == t.pj + 1) {
 						if (seq[ti - 1] == seq[tj - 1]) u.match++;
@@ -328,407 +330,54 @@ vector<int> self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, co
 				}
 				// Pointer is now at the upper-left corner
 				u.qb = ti;
-				u.tb = tj;
-				intv.l = ti;
-				group.units.push_back(intv);
+				g.units.push_back(u);
 				if (seq[ti - 1] == seq[tj - 1]) {
 					u.match++;
-					u.score += o.tr_mat_score;
 				} else {
 					u.mis++;
-					u.score += o.tr_mis_pen;
 				}
 			}
-			group.temp.l = tj;
-			group.temp.r = ti;
-			reverse(group.units.begin(), group.units.end());
-			tr_array.push_back(group);
+			g.tb = tj;
+			g.te = ti;
+			reverse(g.units.begin(), g.units.end());
+			groups.push_back(g);
 		}
 		ti = t.pi == 1 ?ti-1 :ti;
 		tj = t.pj;
 	}
-	reverse(tr_array.begin(), tr_array.end());
+	// It is difficult and inaccurate to directly merge the tandem groups.
+	// An easy way is to break them down to non-overlapping intervals, then merge them based on length and base identity.
+	// But it is more time-consuming if base identity is calculated by DP.
 
-	// Merge tandem groups
-	double MIN_OVERLAP_COEF = 0.9;
-	int new_size = 0;
-	for (int i = 0; i < tr_array.size(); ) {
-		TandemRepeat &tr = tr_array[i];
-		int range_r = tr.units.back().r;
-		int next = tr_array.size();
-		for (int j = i + 1; j < tr_array.size(); j++) {
-			int l = tr_array[j].temp.l;
-			int r = tr_array[j].temp.r;
-			int len = r - l;
-			int overlap = max(range_r - l, 0);
-			if (overlap > MIN_OVERLAP_COEF * len) {
-				// Merge into previous group
-				for (const Interval &intv: tr_array[j].units) {
-					tr.units.push_back(intv);
-				}
-				range_r = tr.units.back().r;
-			} else {
-				next = j;
-				break;
-			}
+	reverse(groups.begin(), groups.end());
+	for (const TandemGroup &g: groups) {
+		assert(g.units.size() > 0);
+		assert(g.units[0].qb >= g.te);
+		printf("Template: [%d, %d)\n", g.tb, g.te);
+		// Tandem repeats must be stacked
+		for (int i = 1; i < g.units.size(); i++) {
+			assert(g.units[i].qb >= g.units[i-1].qe);
 		}
-		tr_array[new_size++] = tr;
-		i = next;
+		printf("Units: ");
+		int total_match = 0, total_mis = 0, total_gap = 0;
+		for (const RepUnit &u: g.units) {
+			printf(" [%d, %d)", u.qb, u.qe);
+			total_match += u.match;
+			total_mis += u.mis;
+			total_gap += u.gap;
+		}
+		printf("\n");
+		double ave_match = 100.0 * total_match / g.units.size() / (g.te - g.tb);
+		double ave_mis = 1.0 * total_mis / g.units.size();
+		double ave_gap = 1.0 * total_gap / g.units.size();
+		printf("Identity: %.2f %%, ave_mis: %.2f, ave_gap: %.2f\n", ave_match, ave_mis, ave_gap);
+	}
+	for (int i = 1; i < groups.size(); i++) {
+		assert(groups[i].units.back().qe > groups[i-1].units.back().qe);
 	}
 
-	// FIXME: This is incorrect because it mixes different groups of tandem repeats
-	int rep_end = -1;
 	vector<int> ret;
-	for (const TandemRepeat &group: tr_array) {
-		if (group.temp.l-1 > rep_end) ret.push_back(group.temp.l-1);
-		if (group.temp.r-1 > rep_end) ret.push_back(group.temp.r-1);
-		for (int i = 0; i < group.units.size(); i++) {
-			if (group.units[i].r-1 > rep_end) {
-				ret.push_back(group.units[i].r-1);
-			}
-		}
-		if (not ret.empty()) rep_end = ret.back();
-	}
-
 	if (ret.empty()) return ret;
-
-	// Breakpoints must be naturally sorted
-	for (int i = 1; i < ret.size(); i++) {
-		assert(ret[i] > ret[i-1]);
-	}
-
-	// Breakpoints are 1-based
-
-	if (1) {
-		fprintf(stdout, "Breakpoints:");
-		for (int i : ret) {
-			fprintf(stdout, " %d", i);
-		}
-		fprintf(stdout, "\n");
-	}
-
-	fprintf(stderr, "Self-alignment identified %ld breakpoints in %.3f CPU seconds\n", ret.size(), cputime() - ctime);
-	return ret;
-}
-
-// Stage 1: identify breakpoints of tandem repeats using self alignment
-static vector<int> self_alignment(const ZigOptions &o, int n, const char *seq, const string &vis_fn = "")
-{
-	double ctime = cputime();
-	const int MAT_SCORE = o.mat_score;
-	const int MIS_PEN = o.mis_pen;
-	const int GAP_O = o.gap_o;
-	const int GAP_E = o.gap_e;
-	const int MIN_UNIT = o.min_unit_size;
-	const int OPEN_TR = o.open_tr_pen;
-	const int CLOSE_TR = o.close_tr_pen;
-	const int TR_MAT_SCORE = o.tr_mat_score;
-	const int TR_MIS_PEN = o.tr_mis_pen;
-	const int TR_GAP_O = o.tr_gap_o;
-	const int TR_GAP_E = o.tr_gap_e;
-
-	if (MAT_SCORE >= TR_MAT_SCORE) {
-		fprintf(stderr, "Warning: setting higher score for diagonal match can't detect tandem repeats\n");
-	}
-
-	// TODO: reduce memory consumption
-	vector<vector<Dp1Cell>> dp;
-	dp.resize(n + 1);
-	for (int i = 0; i <= n; i++) {
-		dp[i].resize(i + 1);
-	}
-	// Global alignment in left-down triangle
-	dp[0][0].H = 0;
-	dp[0][0].D_beg = 1;
-	for (int i = 1; i <= n; i++) {
-		dp[i][0].E = dp[i][0].H = GAP_O + GAP_E * i;
-		for (int j = 1; j < i; j++) {
-			dp[i][j].E = max(dp[i-1][j].H + GAP_O, dp[i-1][j].E) + GAP_E;
-			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
-			int M = dp[i-1][j-1].H + (seq[i-1] == seq[j-1] ? MAT_SCORE : MIS_PEN);
-			if (dp[i][j].E > dp[i][j].H) {
-				dp[i][j].H = dp[i][j].E;
-				dp[i][j].pi = i-1;
-				dp[i][j].pj = j;
-				dp[i][j].event = NORMAL;
-			}
-			if (dp[i][j].F > dp[i][j].H) {
-				dp[i][j].H = dp[i][j].F;
-				dp[i][j].pi = i;
-				dp[i][j].pj = j-1;
-				dp[i][j].event = NORMAL;
-			}
-			if (M > dp[i][j].H) {
-				dp[i][j].H = M;
-				dp[i][j].pi = i-1;
-				dp[i][j].pj = j-1;
-				dp[i][j].event = NORMAL;
-			}
-		}
-		int f = max(dp[i][i-1].H + GAP_O, dp[i][i-1].F) + GAP_E;
-		int m = dp[i-1][i-1].H + MAT_SCORE;
-		if (f > dp[i][i].H) {
-			dp[i][i].H = f;
-			dp[i][i].pi = i;
-			dp[i][i].pj = i-1;
-			dp[i][i].event = NORMAL;
-		}
-		if (m > dp[i][i].H) {
-			dp[i][i].H = m;
-			dp[i][i].pi = i-1;
-			dp[i][i].pj = i-1;
-			dp[i][i].event = NORMAL;
-		}
-		dp[i][i].D_beg = dp[i-1][i-1].D_beg;
-
-		if (i > MIN_UNIT) {
-			// D gate comes from the last row
-			// int max_value = dp[i-1][i-1].H; // Diagonal must be the maximum in regular matrix
-			int max_value = (i - 1) * MAT_SCORE;
-			int D_end = i - 1;
-			int D_beg = dp[i-1][i-1].D_beg; // To prevent illegal path
-			int event = START_REP;
-			for (int j = 1; j < i-1; j++) {
-				// Only start new copy after the end of duplication to prevent illegal path
-				if (dp[i-1][j].D_end == j and dp[i-1][j].dh > max_value) { // If multiple maximums exist, choose the first one
-					max_value = dp[i-1][j].dh;
-					D_beg = dp[i-1][j].D_beg;
-					D_end = j;
-					event = NEW_COPY;
-				}
-			}
-
-			// 0 is excluded because a match/mismatch is mandatory
-			if (event == START_REP) {
-				// Open duplication
-				for (int j = D_beg; j <= D_end - MIN_UNIT + 1; j++) {
-					int tmp = (seq[i-1] == seq[j-1] ? TR_MAT_SCORE : TR_MIS_PEN) + OPEN_TR;
-					dp[i][j].D_gate = max_value + tmp;
-					dp[i][j].D_beg = j;
-					dp[i][j].D_end = D_end;
-					dp[i][j].pi = i-1;
-					dp[i][j].pj = D_end;
-					dp[i][j].event = START_REP;
-				}
-			} else {
-				assert(D_beg > 0);
-				for (int j = D_beg; j <= D_end - MIN_UNIT + 1; j++) {
-					// No penalty for new copy
-					int tmp = (seq[i-1] == seq[j-1] ? TR_MAT_SCORE : TR_MIS_PEN);
-					dp[i][j].D_gate = max_value + tmp;
-					dp[i][j].D_beg = j; // Does it make more sense?
-					dp[i][j].D_end = D_end;
-					dp[i][j].pi = i-1;
-					dp[i][j].pj = D_end;
-					dp[i][j].event = NEW_COPY;
-				}
-			}
-		}
-
-		// Repetition alignment starting from D gates
-		for (int j = 1; j < i; j++) {
-			int v_score = -INF, h_score = -INF, d_score = -INF;
-			if (j >= dp[i-1][j].D_beg and j <= dp[i-1][j].D_end) {
-				v_score = max(max(dp[i-1][j].D_gate, dp[i-1][j].dh) + TR_GAP_O, dp[i-1][j].de) + TR_GAP_E;
-				dp[i][j].de = v_score;
-			}
-			if (j >= dp[i][j-1].D_beg and j <= dp[i][j-1].D_end) {
-				h_score = max(max(dp[i][j-1].D_gate, dp[i][j-1].dh) + TR_GAP_O, dp[i][j-1].df) + TR_GAP_E;
-				dp[i][j].df = h_score;
-			}
-			if (j >= dp[i-1][j-1].D_beg and j <= dp[i-1][j-1].D_end) {
-				int tmp = (seq[i-1] == seq[j-1] ? TR_MAT_SCORE : TR_MIS_PEN);
-				d_score = max(dp[i-1][j-1].D_gate, dp[i-1][j-1].dh) + tmp;
-			}
-
-			// Here, >= prefers continue an existing copy, so it can generate longer tandem repeats
-			if (v_score >= dp[i][j].D_gate and v_score > dp[i][j].dh) {
-				dp[i][j].dh = v_score;
-				dp[i][j].D_beg = dp[i - 1][j].D_beg;
-				dp[i][j].D_end = dp[i - 1][j].D_end;
-				dp[i][j].pi = i-1;
-				dp[i][j].pj = j;
-				dp[i][j].event = WITHIN_REP;
-			}
-			if (h_score >= dp[i][j].D_gate and h_score > dp[i][j].dh) {
-				dp[i][j].dh = h_score;
-				dp[i][j].D_beg = dp[i][j - 1].D_beg;
-				dp[i][j].D_end = dp[i][j - 1].D_end;
-				dp[i][j].pi = i;
-				dp[i][j].pj = j-1;
-				dp[i][j].event = WITHIN_REP;
-			}
-			if (d_score >= dp[i][j].D_gate and d_score > dp[i][j].dh) {
-				dp[i][j].dh = d_score;
-				dp[i][j].D_beg = dp[i - 1][j - 1].D_beg;
-				dp[i][j].D_end = dp[i - 1][j - 1].D_end;
-				dp[i][j].pi = i-1;
-				dp[i][j].pj = j-1;
-				dp[i][j].event = WITHIN_REP;
-			}
-		}
-		// The alignment above can't reach the diagonal
-
-		// B transfer: close a repetition
-		int max_value = -INF, max_j = -1, limit = -1;
-		for (int j = 1; j < i; j++) {
-			// Only return to diagonal if sub-matrix reaches the lower-right corner
-			if (dp[i][j].dh > max_value and dp[i][j].D_end == j) {
-				max_value = dp[i][j].dh;
-				max_j = j;
-				limit = dp[i][j].D_beg;
-			}
-		}
-		if (max_value + CLOSE_TR > dp[i][i].H) {
-			dp[i][i].H = max_value + CLOSE_TR;
-			dp[i][i].pi = i;
-			dp[i][i].pj = max_j;
-			dp[i][i].D_beg = limit;
-			dp[i][i].event = END_REP;
-		}
-	}
-
-	cout << dp[n][n].H << endl;
-
-	if (not vis_fn.empty()) {
-		ofstream out(vis_fn);
-		assert(out.is_open());
-		int ti = n, tj = n, te = -1;
-		while (ti > 0 and tj > 0) {
-			const Dp1Cell &c = dp[ti][tj];
-			if (c.event != te) {
-				out << ti << "\t" << tj << "\t" << c.event << endl;
-			}
-			ti = c.pi;
-			tj = c.pj;
-			te = c.event;
-		}
-		out << 0 << "\t" << 0 << "\t" << te << endl;
-		out.close();
-	}
-
-	// Trace back the optimal path to find tandem repeats
-	int ti = n, tj = n;
-	vector<TandemRepeat> tr_array;
-	while (ti > 0 and tj > 0) {
-		Dp1Cell &t = dp[ti][tj];
-		if (t.event == END_REP) {
-			assert(ti == tj); // Only main diagonal closes repetitions
-			TandemRepeat group;
-			while (t.event != START_REP) {
-				ti = t.pi;
-				tj = t.pj;
-				t = dp[ti][tj]; // Lower-right corner of the sub-matrix
-				Interval intv;
-				intv.r = ti + 1;
-				RepUnit u;
-				u.score = t.dh;
-				u.qe = ti + 1;
-				u.te = tj + 1;
-				while (t.event != NEW_COPY and t.event != START_REP) {
-					if (ti == t.pi + 1 and tj == t.pj + 1) {
-						if (seq[ti - 1] == seq[tj - 1]) u.match++;
-						else u.mis++;
-					} else {
-						u.gap++;
-					}
-					ti = t.pi;
-					tj = t.pj;
-					t = dp[ti][tj];
-				}
-				// Pointer is now at the upper-left corner
-				u.score -= dp[ti][tj].D_gate;
-				u.qb = ti;
-				u.tb = tj;
-				intv.l = ti;
-				group.units.push_back(intv);
-				if (seq[ti - 1] == seq[tj - 1]) {
-					u.match++;
-					u.score += o.tr_mat_score;
-				} else {
-					u.mis++;
-					u.score += o.tr_mis_pen;
-				}
-			}
-			group.temp.l = tj;
-			group.temp.r = ti;
-			reverse(group.units.begin(), group.units.end());
-			tr_array.push_back(group);
-		}
-		ti = t.pi;
-		tj = t.pj;
-	}
-	reverse(tr_array.begin(), tr_array.end());
-	if (DEBUG) {
-		fprintf(stdout, "Tandem repeat groups\n");
-		for (const TandemRepeat &group: tr_array) {
-			fprintf(stdout, "Template: [%d, %d), Units:", group.temp.l, group.temp.r);
-			for (const Interval &intv: group.units) {
-				fprintf(stdout, " [%d, %d)", intv.l, intv.r);
-			}
-			fprintf(stdout, "\n");
-		}
-	}
-
-	// Merge tandem groups
-	double MIN_OVERLAP_COEF = 0.9;
-	int new_size = 0;
-	for (int i = 0; i < tr_array.size(); ) {
-		TandemRepeat &tr = tr_array[i];
-		int range_r = tr.units.back().r;
-		int next = tr_array.size();
-		for (int j = i + 1; j < tr_array.size(); j++) {
-			int l = tr_array[j].temp.l;
-			int r = tr_array[j].temp.r;
-			int len = r - l;
-			int overlap = max(range_r - l, 0);
-			if (overlap > MIN_OVERLAP_COEF * len) {
-				// Merge into previous group
-				for (const Interval &intv: tr_array[j].units) {
-					tr.units.push_back(intv);
-				}
-				range_r = tr.units.back().r;
-			} else {
-				next = j;
-				break;
-			}
-		}
-		tr_array[new_size++] = tr;
-		i = next;
-	}
-
-	// FIXME: This is incorrect because it mixes different groups of tandem repeats
-	int rep_end = -1;
-	vector<int> ret;
-	for (const TandemRepeat &group: tr_array) {
-		if (group.temp.l-1 > rep_end) ret.push_back(group.temp.l-1);
-		if (group.temp.r-1 > rep_end) ret.push_back(group.temp.r-1);
-		for (int i = 0; i < group.units.size(); i++) {
-			if (group.units[i].r-1 > rep_end) {
-				ret.push_back(group.units[i].r-1);
-			}
-		}
-		if (not ret.empty()) rep_end = ret.back();
-	}
-
-	if (ret.empty()) return ret;
-
-	// Breakpoints must be naturally sorted
-	for (int i = 1; i < ret.size(); i++) {
-		assert(ret[i] > ret[i-1]);
-	}
-
-	// Breakpoints are 1-based
-
-	if (1) {
-		fprintf(stdout, "Breakpoints:");
-		for (int i : ret) {
-			fprintf(stdout, " %d", i);
-		}
-		fprintf(stdout, "\n");
-	}
-
-	fprintf(stderr, "Self-alignment identified %ld breakpoints in %.3f CPU seconds\n", ret.size(), cputime() - ctime);
 	return ret;
 }
 
@@ -1536,7 +1185,7 @@ vector<int> process_long(const ZigOptions &opt, int n, const char *seq) {
 		int len = min(n - offset, part_len);
 		fprintf(stderr, "cnt=%d, offset=%d, length=%d\n", cnt+1, offset, len);
 		string vis_fn = "pairwise/hors/hor_b" + to_string(++cnt) + ".txt";
-		vector<int> bps = self_alignment2(opt, len, seq + offset, vis_fn.data());
+		vector<int> bps = self_alignment(opt, len, seq + offset, vis_fn);
 		for (int i = 1; i < bps.size(); i++) {
 			all_bps.push_back(bps[i] + offset);
 		}
@@ -1580,22 +1229,19 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2) {
 	}
 }
 
-void test(const char *fn1, int m, bool test_first) {
+void test(const char *fn1, int m) {
 	pair<string, string> pair1 = input_fasta_seq(fn1);
 	string name1 = pair1.first, seq1 = pair1.second;
 	int t_len = seq1.length();
 	const char *t = seq1.data();
 
 	ZigOptions opt;
-	process_long(opt, t_len, t);
-	return ;
 	int n = min(t_len, m);
-	if (test_first) self_alignment(opt, n, t, "test_1.txt");
-	else self_alignment2(opt, n, t, "text_2.txt");
+	self_alignment(opt, n, t);
 }
 
 int main(int argc, char *argv[]) {
-	test(argv[1], atoi(argv[2]), atoi(argv[3]));
+	test(argv[1], atoi(argv[2]));
 	return 1;
 
 	double ctime = cputime(), rtime = realtime();
