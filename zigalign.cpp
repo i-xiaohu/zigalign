@@ -101,11 +101,11 @@ struct Dp4Cell {
 };
 
 // Compact structure for backtrace
-struct Bt1cell {
+struct Bt1Cell {
 	uint8_t event;
 	uint8_t pi;
 	uint16_t pj;
-	Bt1cell() {
+	Bt1Cell() {
 		event = -1;
 		pi = -1;
 		pj = -1;
@@ -142,7 +142,7 @@ struct TandemRepeat {
 
 const uint16_t SA_MAX_LEN = 50000;
 
-vector<int> self_alignment(const ZigOptions &o, uint16_t n, const char *seq, const string &vis_fn = "")
+vector<vector<Bt1Cell>> self_alignment2(const ZigOptions &o, uint16_t n, const char *seq)
 {
 	if (n > SA_MAX_LEN) {
 		fprintf(stderr, "Sequence length %d exceeds the limit of self alignment %d\n", n, SA_MAX_LEN);
@@ -166,7 +166,7 @@ vector<int> self_alignment(const ZigOptions &o, uint16_t n, const char *seq, con
 	// Memory allocation
 	vector<Dp4Cell> prev_dp(n + 1);
 	vector<Dp4Cell> curr_dp(n + 1);
-	vector<vector<Bt1cell>> bt(n + 1);
+	vector<vector<Bt1Cell>> bt(n + 1);
 	for (int i = 0; i <= n; i++) {
 		bt[i].resize(i + 1);
 	}
@@ -205,6 +205,7 @@ vector<int> self_alignment(const ZigOptions &o, uint16_t n, const char *seq, con
 			}
 		}
 
+		// FIXME: maximum value should be chosen from overlapping template intervals
 		// D transfer
 		for (int j = t_beg; j <= t_end - MIN_UNIT + 1; j++) {
 			int tmp = (seq[i-1] == seq[j-1]) ? TR_MAT_SCORE : TR_MIS_PEN;
@@ -215,6 +216,15 @@ vector<int> self_alignment(const ZigOptions &o, uint16_t n, const char *seq, con
 			bt[i][j].event = event;
 			bt[i][j].pi = 1;
 			bt[i][j].pj = t_end;
+		}
+		for (int j = t_end - MIN_UNIT + 2; j <= i - MIN_UNIT; j++) {
+			int tmp = (seq[i-1] == seq[j-1]) ? TR_MAT_SCORE : TR_MIS_PEN;
+			curr_dp[j].D = (i - 1) * MAT_SCORE + tmp + OPEN_TR;
+			curr_dp[j].beg = j;
+			curr_dp[j].end = i - 1;
+			bt[i][j].event = START_REP;
+			bt[i][j].pi = 1;
+			bt[i][j].pj = i - 1;
 		}
 
 		// Sub matrix of repetition
@@ -285,13 +295,100 @@ vector<int> self_alignment(const ZigOptions &o, uint16_t n, const char *seq, con
 
 	printf("score = %d\n", prev_dp[n].H);
 	fprintf(stderr, "%.3f CPU seconds\n", cputime() - ctime);
+	return bt;
+}
 
+struct RepInterval {
+	int beg, end; // 1-based [beg, end)
+	int mis, gap; // #mismatches and #gaps
+
+	RepInterval() {
+		beg = end = -1;
+		mis = gap = 0;
+	}
+
+	bool operator < (const RepInterval &b) const {
+		return (this->beg != b.beg) ? this->beg < b.beg : this->end < b.end;
+	}
+};
+
+vector<RepInterval> get_reps(uint16_t n, const char *seq, const vector<vector<Bt1Cell>> &bt)
+{
+	int ti = n, tj = n;
+	vector<RepInterval> reps;
+	while (ti > 0 and tj > 0) {
+		Bt1Cell t = bt[ti][tj];
+		if (t.event == END_REP) {
+			assert(ti == tj); // Only main diagonal closes repetitions
+			while (t.event != START_REP) {
+				ti = t.pi == 1 ?ti-1 :ti;
+				tj = t.pj;
+				t = bt[ti][tj]; // Lower-right corner of the sub-matrix
+				RepInterval u;
+				u.end = ti + 1;
+				while (t.event != NEW_COPY and t.event != START_REP) {
+					if (t.pi == 1 and tj == t.pj + 1) {
+						u.mis += (seq[ti - 1] != seq[tj - 1]);
+					} else {
+						u.gap++;
+					}
+					ti = t.pi == 1 ?ti-1 :ti;
+					tj = t.pj;
+					t = bt[ti][tj];
+				}
+				// Pointer is now at the upper-left corner
+				u.mis += (seq[ti - 1] != seq[tj - 1]);
+				u.beg = ti;
+				reps.push_back(u);
+			}
+			// Template for all copy units above
+			RepInterval tem;
+			tem.beg = tj;
+			tem.end = ti;
+			tem.mis = tem.gap = -1;
+			reps.push_back(tem);
+		}
+		ti = t.pi == 1 ?ti-1 :ti;
+		tj = t.pj;
+	}
+
+	// de-overlap repeat units (tandem repeats should be neatly stacked)
+	sort(reps.begin(), reps.end());
+	int new_size = 0;
+	for (int i = 0; i < reps.size(); ) {
+		const RepInterval &x = reps[i];
+		bool kept = true;
+		int j = i + 1;
+		for (; j < reps.size(); j++) {
+			const RepInterval &y = reps[j];
+			if (y.beg >= x.end) break;
+			// Keep the longer one
+			if (y.end - y.beg >= x.end - x.beg) {
+				kept = false;
+				break;
+			}
+		}
+		if (kept) reps[new_size++] = x;
+		i = j;
+	}
+	reps.resize(new_size);
+	// TODO: merge or split repeats
+
+	for (const RepInterval &r: reps) {
+		printf("[%d, %d) mis=%d, gap=%d\n", r.beg, r.end, r.mis, r.gap);
+	}
+	return reps;
+}
+
+vector<int> self_alignment(const ZigOptions &o, uint16_t n, const char *seq, const string &vis_fn = "")
+{
+	vector<vector<Bt1Cell>> bt = self_alignment2(o, n, seq);
 	if (not vis_fn.empty()) {
 		ofstream out(vis_fn);
 		assert(out.is_open());
 		int ti = n, tj = n, te = -1;
 		while (ti > 0 and tj > 0) {
-			const Bt1cell &c = bt[ti][tj];
+			const Bt1Cell &c = bt[ti][tj];
 			if (c.event != te) {
 				out << ti << "\t" << tj << "\t" << (int)c.event << endl;
 			}
@@ -307,7 +404,7 @@ vector<int> self_alignment(const ZigOptions &o, uint16_t n, const char *seq, con
 	int ti = n, tj = n;
 	vector<TandemGroup> groups;
 	while (ti > 0 and tj > 0) {
-		Bt1cell &t = bt[ti][tj];
+		Bt1Cell &t = bt[ti][tj];
 		if (t.event == END_REP) {
 			assert(ti == tj); // Only main diagonal closes repetitions
 			TandemGroup g;
@@ -1229,19 +1326,143 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2) {
 	}
 }
 
-void test(const char *fn1, int m) {
+// Recursive search is not efficient.
+inline int us_find(vector<int> &sid, int u) {
+	if (sid[u] != u) {
+		sid[u] = us_find(sid, sid[u]);
+	}
+	return sid[u];
+}
+
+// Rank is not used.
+inline void us_union(vector<int> &sid, int u, int v) {
+	int su = us_find(sid, u);
+	int sv = us_find(sid, v);
+	if (su != sv) {
+		sid[sv] = su;
+	}
+}
+
+vector<RepInterval> shift_reps(int n, const vector<RepInterval> &reps, vector<vector<Bt1Cell>> &bt, int pos)
+{
+	assert(pos < n);
+	vector<bool> vis(n + 1, false);
+	for (const RepInterval &r: reps) {
+		if (r.mis != -1) {
+			for (int i = r.beg; i < r.end; i++) {
+				vis[i] = true;
+			}
+		}
+	}
+	vector<int> sid(n + 1);
+	for (int i = 1; i <= n; i++) {
+		sid[i] = i;
+	}
+	int ti = n, tj = n;
+	while (ti > 0 and tj > 0) {
+		const Bt1Cell &c = bt[ti][tj];
+		// Project copies onto template
+		if (vis[ti]) us_union(sid, ti, tj);
+		ti = (c.pi == 1) ?ti-1 :ti;
+		tj = c.pj;
+	}
+
+	vector<RepInterval> ret;
+	int shift = pos; // Truncated leading bases
+	int k = 0;
+	for (; k < reps.size(); k++) {
+		const RepInterval &r = reps[k];
+		if (r.beg > shift) {
+			break;
+		}
+	}
+	if (k == 0 or reps[k-1].end <= shift) {
+		// Truncated position is not in any tandem repeat
+		for (; k < reps.size(); k++) {
+			ret.push_back(reps[k]);
+		}
+	} else {
+		assert(reps[k-1].beg <= shift and reps[k-1].end > shift);
+		RepInterval v;
+		v.beg = shift;
+		int root = us_find(sid, shift);
+		for (; k < reps.size(); k++) {
+			const RepInterval &r = reps[k];
+			bool found = false;
+			for (int i = r.beg; i < r.end; i++) {
+				if (us_find(sid, i) == root) {
+					found = true;
+					v.end = i;
+					ret.push_back(v);
+					v.beg = i;
+					break;
+				}
+			}
+			if (not found) break; // Till another group of repeats
+		}
+		// The rest of repeats are not affected by the truncation
+		for (; k < reps.size(); k++) {
+			const RepInterval &r = reps[k];
+			ret.push_back(r);
+		}
+	}
+	printf("Shifted reps:\n");
+	for (const RepInterval &r: ret) {
+		printf("[%d, %d) mis=%d, gap=%d\n", r.beg, r.end, r.mis, r.gap);
+	}
+	return ret;
+}
+
+void test(const char *fn1, int offset, int n) {
 	pair<string, string> pair1 = input_fasta_seq(fn1);
 	string name1 = pair1.first, seq1 = pair1.second;
 	int t_len = seq1.length();
-	const char *t = seq1.data();
+	const char *t = seq1.data() + offset;
 
+	const int PART_LEN = 40000;
+	const int STEP_LEN = 20000;
 	ZigOptions opt;
-	int n = min(t_len, m);
-	self_alignment(opt, n, t);
+	vector<vector<Bt1Cell>> bt = self_alignment2(opt, PART_LEN, t);
+	vector<RepInterval> reps = get_reps(PART_LEN, t, bt);
+
+	int pos = 0;
+	for (const RepInterval &r: reps) {
+		if (r.end > STEP_LEN) {
+			pos = r.end - STEP_LEN;
+			break;
+		}
+	}
+	printf("Start at %d in the second sequence\n", pos);
+
+	vector<vector<Bt1Cell>> bt2 = self_alignment2(opt, PART_LEN, t + STEP_LEN);
+	vector<RepInterval> reps2 = get_reps(PART_LEN, t + STEP_LEN, bt2);
+	reps2 = shift_reps(PART_LEN, reps2, bt2, pos);
+
+	// TODO: compare the stitched repeats with the repeats calculated with the complete sequence
+	vector<vector<Bt1Cell>> bt3 = self_alignment2(opt, PART_LEN, t + STEP_LEN + pos);
+	vector<RepInterval> reps3 = get_reps(PART_LEN, t + STEP_LEN + pos, bt3);
+
+	string vis_fn = "qqq.txt";
+	if (not vis_fn.empty()) {
+		ofstream out(vis_fn);
+		assert(out.is_open());
+		int ti = n, tj = n, te = -1;
+		while (ti > 0 and tj > 0) {
+			const Bt1Cell &c = bt[ti][tj];
+			if (c.event != te) {
+				out << ti << "\t" << tj << "\t" << (int)c.event << endl;
+			}
+			ti = (c.pi == 1) ?ti-1 :ti;
+			tj = c.pj;
+			te = c.event;
+		}
+		out << 0 << "\t" << 0 << "\t" << te << endl;
+		out.close();
+	}
 }
 
 int main(int argc, char *argv[]) {
-	test(argv[1], atoi(argv[2]));
+	test(argv[1], atoi(argv[2]), atoi(argv[3]));
 	return 1;
 
 	double ctime = cputime(), rtime = realtime();
