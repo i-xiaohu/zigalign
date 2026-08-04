@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <numeric>
 #include <ratio>
+#include <omp.h>
 
 #include "utils.h"
 using namespace std;
@@ -39,6 +40,7 @@ struct ZigOptions {
 	int del_dup_e;
 	// K-band size
 	int band_width;
+	int n_threads;
 	// Visualization
 	const char *vis_prefix;
 
@@ -58,11 +60,15 @@ struct ZigOptions {
 		del_dup_o = -6;
 		del_dup_e = -2;
 		band_width = 50;
+		n_threads = 8;
 		vis_prefix = nullptr;
 	}
 };
 
 const int INF = 100000000;
+
+const int PART_LEN = 40000;
+const int STEP_LEN = 20000;
 
 // Move them to code block
 const int NORMAL = 0;
@@ -149,7 +155,6 @@ vector<vector<Bt1Cell>> self_alignment2(const ZigOptions &o, uint16_t n, const c
 		abort();
 	}
 
-	double ctime = cputime();
 	const int MAT_SCORE = o.mat_score;
 	const uint16_t MIN_UNIT = o.min_unit_size;
 	const int OPEN_TR = o.open_tr_pen;
@@ -292,9 +297,6 @@ vector<vector<Bt1Cell>> self_alignment2(const ZigOptions &o, uint16_t n, const c
 
 		swap(prev_dp, curr_dp);
 	}
-
-	printf("score = %d\n", prev_dp[n].H);
-	fprintf(stderr, "%.3f CPU seconds\n", cputime() - ctime);
 	return bt;
 }
 
@@ -374,9 +376,9 @@ vector<RepInterval> get_reps(uint16_t n, const char *seq, const vector<vector<Bt
 	reps.resize(new_size);
 	// TODO: merge or split repeats
 
-	for (const RepInterval &r: reps) {
-		printf("[%d, %d) mis=%d, gap=%d\n", r.beg, r.end, r.mis, r.gap);
-	}
+	// for (const RepInterval &r: reps) {
+	// 	printf("[%d, %d) mis=%d, gap=%d\n", r.beg, r.end, r.mis, r.gap);
+	// }
 	return reps;
 }
 
@@ -1406,11 +1408,107 @@ vector<RepInterval> shift_reps(int n, const vector<RepInterval> &reps, vector<ve
 			ret.push_back(r);
 		}
 	}
-	printf("Shifted reps:\n");
-	for (const RepInterval &r: ret) {
-		printf("[%d, %d) mis=%d, gap=%d\n", r.beg, r.end, r.mis, r.gap);
-	}
+	// printf("Shifted reps:\n");
+	// for (const RepInterval &r: ret) {
+	// 	printf("[%d, %d) mis=%d, gap=%d\n", r.beg, r.end, r.mis, r.gap);
+	// }
 	return ret;
+}
+
+void process_long2(const ZigOptions &opt, int n, const char *seq)
+{
+	assert(opt.n_threads > 0);
+	int n_threads = opt.n_threads;
+	int offset = 0;
+	vector<vector<Bt1Cell>> bt_bin[n_threads];
+	vector<RepInterval> reps_bin[n_threads];
+	vector<RepInterval> all_reps;
+
+	int batch_id = 0;
+	omp_set_num_threads(n_threads);
+	while (offset < n) {
+		double c_start = cputime(), r_start = realtime();
+		int guard = offset + (n_threads - 1) * STEP_LEN + PART_LEN;
+		// fprintf(stderr, "offset = %d, guard = %d\n", offset, guard);
+		if (guard >= n) break;
+		// Multi-threading DP
+		 #pragma omp parallel for
+		for (int i = 0; i < n_threads; i++) {
+			const char *tmp = seq + offset + i * STEP_LEN;
+			bt_bin[i] = self_alignment2(opt, PART_LEN, tmp);
+			reps_bin[i] = get_reps(PART_LEN, tmp, bt_bin[i]);
+		}
+		// Single-thread Stitching
+		int shift_pos = 0;
+		int added_reps = 0;
+		for (int i = 0; i < n_threads; i++) {
+			// fprintf(stderr, "i=%d, shift = %d\n", i, shift_pos);
+			if (shift_pos) {
+				reps_bin[i] = shift_reps(PART_LEN, reps_bin[i], bt_bin[i], shift_pos);
+			}
+			for (const RepInterval &r: reps_bin[i]) {
+				RepInterval x = r;
+				x.beg += offset + i * STEP_LEN;
+				x.end += offset + i * STEP_LEN;
+				all_reps.push_back(x);
+				added_reps++;
+				if (r.end >= STEP_LEN) {
+					shift_pos = r.end - STEP_LEN;
+					break;
+				}
+			}
+		}
+
+		// Find the repeat crossing the boundary
+		int old_offset = offset;
+		bool found = false;
+		for (const RepInterval &r: reps_bin[n_threads - 1]) {
+			if (r.end >= STEP_LEN) {
+				found = true;
+				offset += (n_threads - 1) * STEP_LEN + r.end;
+				break;
+			}
+		}
+		if (not found) offset = guard;
+		fprintf(stderr, "Batch %d, offset: %d, added_reps: %d, real_time: %.2f, CPU_time: %.2f\n",
+			++batch_id, old_offset, added_reps, realtime() - r_start, cputime() - c_start);
+	}
+
+	int m = n - offset;
+	if (m <= PART_LEN) {
+		n_threads = 1;
+	} else {
+		n_threads = 2 + m / STEP_LEN;
+	}
+	for (int i = 0; i < n_threads; i++) {
+		int os = offset + i * STEP_LEN;
+		const char *tmp = seq + os;
+		int len = min(PART_LEN, n - os);
+		bt_bin[i] = self_alignment2(opt, len, tmp);
+		reps_bin[i] = get_reps(len, tmp, bt_bin[i]);
+	}
+	int shift_pos = 0;
+	for (int i = 0; i < n_threads; i++) {
+		int os = offset + i * STEP_LEN;
+		int len = min(PART_LEN, n - os);
+		if (shift_pos) {
+			reps_bin[i] = shift_reps(len, reps_bin[i], bt_bin[i], shift_pos);
+		}
+		for (const RepInterval &r: reps_bin[i]) {
+			RepInterval x = r;
+			x.beg += offset + i * STEP_LEN;
+			x.end += offset + i * STEP_LEN;
+			all_reps.push_back(x);
+			if (i != n_threads - 1 and r.end >= STEP_LEN) {
+				shift_pos = r.end - STEP_LEN;
+				break;
+			}
+		}
+	}
+
+	for (const RepInterval &r: all_reps) {
+		printf("[%d, %d), length=%d\n", r.beg, r.end, r.end - r.beg);
+	}
 }
 
 void test(const char *fn1, int offset, int n) {
@@ -1419,46 +1517,8 @@ void test(const char *fn1, int offset, int n) {
 	int t_len = seq1.length();
 	const char *t = seq1.data() + offset;
 
-	const int PART_LEN = 40000;
-	const int STEP_LEN = 20000;
 	ZigOptions opt;
-	vector<vector<Bt1Cell>> bt = self_alignment2(opt, PART_LEN, t);
-	vector<RepInterval> reps = get_reps(PART_LEN, t, bt);
-
-	int pos = 0;
-	for (const RepInterval &r: reps) {
-		if (r.end > STEP_LEN) {
-			pos = r.end - STEP_LEN;
-			break;
-		}
-	}
-	printf("Start at %d in the second sequence\n", pos);
-
-	vector<vector<Bt1Cell>> bt2 = self_alignment2(opt, PART_LEN, t + STEP_LEN);
-	vector<RepInterval> reps2 = get_reps(PART_LEN, t + STEP_LEN, bt2);
-	reps2 = shift_reps(PART_LEN, reps2, bt2, pos);
-
-	// TODO: compare the stitched repeats with the repeats calculated with the complete sequence
-	vector<vector<Bt1Cell>> bt3 = self_alignment2(opt, PART_LEN, t + STEP_LEN + pos);
-	vector<RepInterval> reps3 = get_reps(PART_LEN, t + STEP_LEN + pos, bt3);
-
-	string vis_fn = "qqq.txt";
-	if (not vis_fn.empty()) {
-		ofstream out(vis_fn);
-		assert(out.is_open());
-		int ti = n, tj = n, te = -1;
-		while (ti > 0 and tj > 0) {
-			const Bt1Cell &c = bt[ti][tj];
-			if (c.event != te) {
-				out << ti << "\t" << tj << "\t" << (int)c.event << endl;
-			}
-			ti = (c.pi == 1) ?ti-1 :ti;
-			tj = c.pj;
-			te = c.event;
-		}
-		out << 0 << "\t" << 0 << "\t" << te << endl;
-		out.close();
-	}
+	process_long2(opt, t_len, t);
 }
 
 int main(int argc, char *argv[]) {
