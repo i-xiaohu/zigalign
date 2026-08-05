@@ -148,7 +148,7 @@ struct TandemRepeat {
 
 const uint16_t SA_MAX_LEN = 50000;
 
-vector<vector<Bt1Cell>> self_alignment2(const ZigOptions &o, uint16_t n, const char *seq)
+ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<vector<Bt1Cell>> &bt)
 {
 	if (n > SA_MAX_LEN) {
 		fprintf(stderr, "Sequence length %d exceeds the limit of self alignment %d\n", n, SA_MAX_LEN);
@@ -168,10 +168,22 @@ vector<vector<Bt1Cell>> self_alignment2(const ZigOptions &o, uint16_t n, const c
 		fprintf(stderr, "Warning: setting higher score for diagonal match can't detect tandem repeats\n");
 	}
 
+	if (n < MIN_UNIT) {
+		bt.resize(n + 1);
+		for (int i = 0; i <= n; i++) {
+			bt[i].resize(i + 1);
+			if (i > 0) {
+				bt[i][i].event = NORMAL;
+				bt[i][i].pi = 1;
+				bt[i][i].pj = i-1;
+			}
+		}
+	}
+
 	// Memory allocation
 	vector<Dp4Cell> prev_dp(n + 1);
 	vector<Dp4Cell> curr_dp(n + 1);
-	vector<vector<Bt1Cell>> bt(n + 1);
+ 	bt.resize(n + 1);
 	for (int i = 0; i <= n; i++) {
 		bt[i].resize(i + 1);
 	}
@@ -297,7 +309,6 @@ vector<vector<Bt1Cell>> self_alignment2(const ZigOptions &o, uint16_t n, const c
 
 		swap(prev_dp, curr_dp);
 	}
-	return bt;
 }
 
 struct RepInterval {
@@ -354,6 +365,8 @@ vector<RepInterval> get_reps(uint16_t n, const char *seq, const vector<vector<Bt
 		tj = t.pj;
 	}
 
+	if (reps.empty()) return reps;
+
 	// de-overlap repeat units (tandem repeats should be neatly stacked)
 	sort(reps.begin(), reps.end());
 	int new_size = 0;
@@ -384,7 +397,8 @@ vector<RepInterval> get_reps(uint16_t n, const char *seq, const vector<vector<Bt
 
 vector<int> self_alignment(const ZigOptions &o, uint16_t n, const char *seq, const string &vis_fn = "")
 {
-	vector<vector<Bt1Cell>> bt = self_alignment2(o, n, seq);
+	vector<vector<Bt1Cell>> bt;
+	self_alignment2(o, n, seq, bt);
 	if (not vis_fn.empty()) {
 		ofstream out(vis_fn);
 		assert(out.is_open());
@@ -1427,16 +1441,16 @@ void process_long2(const ZigOptions &opt, int n, const char *seq)
 	int batch_id = 0;
 	omp_set_num_threads(n_threads);
 	while (offset < n) {
-		double c_start = cputime(), r_start = realtime();
+		double r_start = realtime(), c_start = cputime();
 		int guard = offset + (n_threads - 1) * STEP_LEN + PART_LEN;
 		// fprintf(stderr, "offset = %d, guard = %d\n", offset, guard);
 		if (guard >= n) break;
 		// Multi-threading DP
 		 #pragma omp parallel for
 		for (int i = 0; i < n_threads; i++) {
-			const char *tmp = seq + offset + i * STEP_LEN;
-			bt_bin[i] = self_alignment2(opt, PART_LEN, tmp);
-			reps_bin[i] = get_reps(PART_LEN, tmp, bt_bin[i]);
+			const char *s = seq + offset + i * STEP_LEN;
+			self_alignment2(opt, PART_LEN, s, bt_bin[i]);
+			reps_bin[i] = get_reps(PART_LEN, s, bt_bin[i]);
 		}
 		// Single-thread Stitching
 		int shift_pos = 0;
@@ -1474,20 +1488,24 @@ void process_long2(const ZigOptions &opt, int n, const char *seq)
 			++batch_id, old_offset, added_reps, realtime() - r_start, cputime() - c_start);
 	}
 
+	// Process the last batch
 	int m = n - offset;
 	if (m <= PART_LEN) {
 		n_threads = 1;
 	} else {
 		n_threads = 2 + m / STEP_LEN;
 	}
+	double r_start = realtime(), c_start = cputime();
+	#pragma omp parallel for num_threads(n_threads)
 	for (int i = 0; i < n_threads; i++) {
 		int os = offset + i * STEP_LEN;
-		const char *tmp = seq + os;
+		const char *s = seq + os;
 		int len = min(PART_LEN, n - os);
-		bt_bin[i] = self_alignment2(opt, len, tmp);
-		reps_bin[i] = get_reps(len, tmp, bt_bin[i]);
+		self_alignment2(opt, len, s, bt_bin[i]);
+		reps_bin[i] = get_reps(len, s, bt_bin[i]);
 	}
 	int shift_pos = 0;
+	int added_reps = 0;
 	for (int i = 0; i < n_threads; i++) {
 		int os = offset + i * STEP_LEN;
 		int len = min(PART_LEN, n - os);
@@ -1499,12 +1517,15 @@ void process_long2(const ZigOptions &opt, int n, const char *seq)
 			x.beg += offset + i * STEP_LEN;
 			x.end += offset + i * STEP_LEN;
 			all_reps.push_back(x);
+			added_reps++;
 			if (i != n_threads - 1 and r.end >= STEP_LEN) {
 				shift_pos = r.end - STEP_LEN;
 				break;
 			}
 		}
 	}
+	fprintf(stderr, "Batch %d, offset: %d, length: %d, threads: %d, added_reps: %d, real_time: %.2f, CPU_time: %.2f\n",
+		++batch_id, offset, m, n_threads, added_reps, realtime() - r_start, cputime() - c_start);
 
 	for (const RepInterval &r: all_reps) {
 		printf("[%d, %d), length=%d\n", r.beg, r.end, r.end - r.beg);
@@ -1516,6 +1537,7 @@ void test(const char *fn1, int offset, int n) {
 	string name1 = pair1.first, seq1 = pair1.second;
 	int t_len = seq1.length();
 	const char *t = seq1.data() + offset;
+	t_len -= offset;
 
 	ZigOptions opt;
 	process_long2(opt, t_len, t);
