@@ -80,27 +80,9 @@ const int END_REP = 4;
 int DEBUG = 0;
 
 struct Dp1Cell {
-	int E, F, H; // The original SW matrix
-	int D_gate; // Gate of duplication
-	int D_end; // Where duplication ends
-	int D_beg; // Where duplication or new copy begins
-	int de, df, dh; // Sub matrix of duplication
-	int pi, pj, event; // Backtrace
-
-	Dp1Cell() {
-		E = F = H = -INF;
-		D_gate = -INF;
-		D_end = -1;
-		D_beg = -1;
-		de = df = dh = -INF;
-		pi = pj = event = -1;
-	}
-};
-
-struct Dp4Cell {
 	int D, E, F, H; // D: score for duplication events
 	int beg, end; // The range of duplication or new copy
-	Dp4Cell() {
+	Dp1Cell() {
 		D = E = F = H = -INF;
 		beg = end = -1;
 	}
@@ -181,8 +163,8 @@ const uint16_t SA_MAX_LEN = 50000;
 	}
 
 	// Memory allocation
-	vector<Dp4Cell> prev_dp(n + 1);
-	vector<Dp4Cell> curr_dp(n + 1);
+	vector<Dp1Cell> prev_dp(n + 1);
+	vector<Dp1Cell> curr_dp(n + 1);
  	bt.resize(n + 1);
 	for (int i = 0; i <= n; i++) {
 		bt[i].resize(i + 1);
@@ -201,7 +183,7 @@ const uint16_t SA_MAX_LEN = 50000;
 
 	// Main loop
 	for (int i = MIN_UNIT + 1; i <= n; i++) {
-		for (int j = 0; j <= i; j++) curr_dp[j] = Dp4Cell();
+		for (int j = 0; j <= i; j++) curr_dp[j] = Dp1Cell();
 		curr_dp[i].H = prev_dp[i-1].H + MAT_SCORE;
 		bt[i][i].event = NORMAL;
 		bt[i][i].pi = 1;
@@ -1446,12 +1428,23 @@ void process_long2(const ZigOptions &opt, int n, const char *seq)
 		// fprintf(stderr, "offset = %d, guard = %d\n", offset, guard);
 		if (guard >= n) break;
 		// Multi-threading DP
-		 #pragma omp parallel for
+		#pragma omp parallel for
 		for (int i = 0; i < n_threads; i++) {
 			const char *s = seq + offset + i * STEP_LEN;
 			self_alignment2(opt, PART_LEN, s, bt_bin[i]);
 			reps_bin[i] = get_reps(PART_LEN, s, bt_bin[i]);
 		}
+
+		// for (int i = 0; i < n_threads; i++) {
+		// 	const vector<RepInterval> &bin = reps_bin[i];
+		// 	fprintf(stderr, "thread %d\n", i);
+		// 	for (int j = 0; j < bin.size(); j++) {
+		// 		fprintf(stderr, "@%d %d %d\n", j, bin[j].beg, bin[j].end);
+		// 	}
+		// 	fprintf(stderr, "\n");
+		// }
+
+		// TODO: use thread pipeline
 		// Single-thread Stitching
 		int shift_pos = 0;
 		int added_reps = 0;
@@ -1468,6 +1461,11 @@ void process_long2(const ZigOptions &opt, int n, const char *seq)
 				added_reps++;
 				if (r.end >= STEP_LEN) {
 					shift_pos = r.end - STEP_LEN;
+					// Find the repeat that crosses the next bin to connect them
+					if (i + 1 < n_threads and reps_bin[i + 1].size() > 0) {
+						bool ok = (reps_bin[i+1][0].beg <= shift_pos and reps_bin[i+1][0].end >= shift_pos);
+						if (not ok) continue;
+					}
 					break;
 				}
 			}
@@ -1493,7 +1491,7 @@ void process_long2(const ZigOptions &opt, int n, const char *seq)
 	if (m <= PART_LEN) {
 		n_threads = 1;
 	} else {
-		n_threads = 2 + m / STEP_LEN;
+		n_threads = m / STEP_LEN;
 	}
 	double r_start = realtime(), c_start = cputime();
 	#pragma omp parallel for num_threads(n_threads)
