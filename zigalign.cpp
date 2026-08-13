@@ -1530,6 +1530,209 @@ void process_long2(const ZigOptions &opt, int n, const char *seq)
 	}
 }
 
+struct LocalResult {
+	int max_score;
+	int beg_a, end_a;
+	int beg_b, end_b;
+};
+
+LocalResult local_alignment(int n, const char *a, int m, const char *b)
+{
+	// Classical SI score matrix
+	const int MAT_S = 1;
+	const int MIS_P = -4;
+	const int GAP_O = -6;
+	const int GAP_E = -1;
+
+	const int STOP = 0;
+	const int VERTICAL = 1;
+	const int HORIZONTAL = 2;
+	const int DIAGONAL = 3;
+
+	int *prev_H = (int*) calloc(m + 1, sizeof(int));
+	int *curr_H = (int*) calloc(m + 1, sizeof(int));
+	int *prev_E = (int*) calloc(m + 1, sizeof(int));
+	int *curr_E = (int*) calloc(m + 1, sizeof(int));
+	vector<vector<uint8_t>> bt(n + 1);
+	for (int i = 0; i <= n; i++) bt[i].resize(m + 1, STOP);
+	int max_score = -1;
+	int end_i = 0, end_j = 0;
+
+	for (int i = 1; i <= n; i++) {
+		int F = 0;
+		memset(curr_H, 0, (m + 1) * sizeof(int));
+		for (int j = 1; j <= m; j++) {
+			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
+			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
+			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
+			if (F > curr_H[j]) {
+				curr_H[j] = F;
+				bt[i][j] = HORIZONTAL;
+			}
+			if (curr_E[j] > curr_H[j]) {
+				curr_H[j] = curr_E[j];
+				bt[i][j] = VERTICAL;
+			}
+			if (M > curr_H[j]) {
+				curr_H[j] = M;
+				bt[i][j] = DIAGONAL;
+			}
+			if (curr_H[j] > max_score) {
+				max_score = curr_H[j];
+				end_i = i;
+				end_j = j;
+			}
+		}
+		swap(prev_H, curr_H);
+		swap(prev_E, curr_E);
+	}
+	free(prev_H);
+	free(curr_H);
+	free(prev_E);
+	free(curr_E);
+
+	int pi = end_i, pj = end_j;
+	string ext_a, ext_b, align;
+	while (bt[pi][pj] != STOP) {
+		switch (bt[pi][pj]) {
+		case DIAGONAL:
+			ext_a += a[--pi];
+			ext_b += b[--pj];
+			align += (a[pi] == b[pj] ?' ' :'X');
+			break;
+		case VERTICAL:
+			ext_a += a[--pi];
+			ext_b += '-';
+			align += ' ';
+			break;
+		case HORIZONTAL:
+			ext_a += ' ';
+			ext_b += b[--pj];
+			align += ' ';
+			break;
+		default:
+			break;
+		}
+	}
+	reverse(ext_a.begin(), ext_a.end());
+	reverse(ext_b.begin(), ext_b.end());
+	reverse(align.begin(), align.end());
+
+	// cout << ext_a << endl;
+	// cout << align << endl;
+	// cout << ext_b << endl;
+	// printf("[%d, %d) aligns with [%d, %d), max_score=%d\n", pi, end_i, pj, end_j, max_score);
+
+	LocalResult ret;
+	ret.max_score = max_score;
+	ret.beg_a = pi;
+	ret.end_a = end_i;
+	ret.beg_b = pj;
+	ret.end_b = end_j;
+	return ret;
+}
+
+void dev_stage3() {
+	FILE *f = fopen("pairwise/chm13.txt", "r");
+	assert(f != nullptr);
+	char line[2048];
+	vector<RepInterval> chm13_intvs;
+	while (fgets(line, 2048, f)) {
+		if (line[0] == '[') {
+			int beg, end, length;
+			sscanf(line, "[%d, %d), length=%d", &beg, &end, &length);
+			RepInterval x;
+			x.beg = beg - 1;
+			x.end = end - 1;
+			chm13_intvs.push_back(x);
+		}
+	}
+	fclose(f);
+	fprintf(stderr, "CHM13 intervals %ld\n", chm13_intvs.size());
+
+
+	f = fopen("pairwise/hg002.txt", "r");
+	assert(f != nullptr);
+	vector<RepInterval> hg002_intvs;
+	while (fgets(line, 2048, f)) {
+		if (line[0] == '[') {
+			int beg, end, length;
+			sscanf(line, "[%d, %d), length=%d", &beg, &end, &length);
+			RepInterval x;
+			x.beg = beg - 1;
+			x.end = end - 1;
+			hg002_intvs.push_back(x);
+		}
+	}
+	fclose(f);
+	fprintf(stderr, "HG002 intervals %ld\n", hg002_intvs.size());
+
+	pair<string,string> pair1 = input_fasta_seq("pairwise/chm13_cenX.fa");
+	int chm13_len = pair1.second.length();
+	const char *chm13_seq = pair1.second.data();
+	fprintf(stderr, "CHM13 length: %d\n", chm13_len);
+
+	pair<string,string> pair2 = input_fasta_seq("pairwise/hg002_cenX.fa");
+	int hg002_len = pair2.second.length();
+	const char *hg002_seq = pair2.second.data();
+	fprintf(stderr, "HG002 length: %d\n", hg002_len);
+
+	// Process rotated repeats
+	ZigOptions opt;
+	const int MAX_COMPARE = 30;
+	const int MARGIN = 5;
+	const double MIN_MATCH_RATIO = 0.5;
+
+	int *count_chm13 = (int*) calloc(chm13_len, sizeof(int));
+	int *count_hg002 = (int*) calloc(hg002_len, sizeof(int));
+	for (int i = 0; i < chm13_intvs.size(); i++) {
+		const RepInterval &a = chm13_intvs[i];
+		int len_a = a.end - a.beg;
+		int low = max(i - MAX_COMPARE, 0);
+		int high = min(i + MAX_COMPARE, (int)hg002_intvs.size());
+		int local_cnt[len_a];
+		memset(local_cnt, 0, sizeof(local_cnt));
+		for (int j = low; j < high; j++) {
+			const RepInterval &b = hg002_intvs[j];
+			int len_b = b.end - b.beg;
+			// TODO: use banded alignment to accelerate it
+			LocalResult res = local_alignment(len_a, chm13_seq + a.beg, len_b, hg002_seq + b.beg);
+			int bp_a = -1, bp_b = -1;
+			double ratio_a = 1.0 * (res.end_a - res.beg_a) / (a.end - a.beg);
+			double ratio_b = 1.0 * (res.end_b - res.beg_b) / (b.end - b.beg);
+			if (res.beg_a < MARGIN) bp_a = res.end_a - 1;
+			else if (len_a - res.end_a < MARGIN) bp_a = res.beg_a;
+			if (res.beg_b < MARGIN) bp_b = res.end_b - 1;
+			else if (len_b - res.end_b < MARGIN) bp_b = res.beg_b;
+			// At least 50% prefix-suffix match
+			if (ratio_a > MIN_MATCH_RATIO and ratio_b > MIN_MATCH_RATIO and bp_a != -1 and bp_b != -1) {
+				local_cnt[bp_a]++;
+				// count_chm13[a.beg + bp_a]++;
+				// count_hg002[b.beg + bp_b]++;
+			}
+		}
+		// for (int j = 0; j < len_a; j++) {
+		// 	if (local_cnt[j]) {
+		// 		printf("j=%d, cnt=%d\n", j, local_cnt[j]);
+		// 	}
+		// }
+		// printf("\n");
+	}
+	exit(1);
+	printf("CHM13 repeat rotations\n");
+	for (const RepInterval &r: chm13_intvs) {
+		printf("%d %d\n", r.beg, r.end);
+		for (int i = r.beg; i < r.end; i++) {
+			if (count_chm13[i]) {
+				printf("i=%d, count=%d\n", i, count_chm13[i]);
+			}
+		}
+		printf("\n");
+	}
+	free(count_chm13);
+	free(count_hg002);
+}
+
 void test(const char *fn1, int offset, int n) {
 	pair<string, string> pair1 = input_fasta_seq(fn1);
 	string name1 = pair1.first, seq1 = pair1.second;
@@ -1538,11 +1741,10 @@ void test(const char *fn1, int offset, int n) {
 	t_len -= offset;
 
 	ZigOptions opt;
-	process_long2(opt, t_len, t);
 }
 
 int main(int argc, char *argv[]) {
-	test(argv[1], atoi(argv[2]), atoi(argv[3]));
+	dev_stage3();
 	return 1;
 
 	double ctime = cputime(), rtime = realtime();
