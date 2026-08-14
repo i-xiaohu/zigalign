@@ -1865,19 +1865,20 @@ void compare_split_intervals() {
 
 	double c_start = cputime(), r_start = realtime();
 	// Scoring matrix between repeat units
-	vector<vector<int>> matrix(chm13.size());
-	for (int i = 0; i < chm13.size(); i++) {
-		matrix[i].resize(hg002.size(), -INF);
+	const int n = chm13.size(), m = hg002.size();
+	vector<vector<int>> matrix(n);
+	for (int i = 0; i < n; i++) {
+		matrix[i].resize(m, -INF);
 	}
 	const int MAX_COMPARE = 60;
 	const int MAX_DISTANCE = 80000;
 	omp_set_num_threads(8);
 	#pragma omp parallel for
-	for (int i = 0; i < chm13.size(); i++) {
+	for (int i = 0; i < n; i++) {
 		const SplitInterval &a = chm13[i];
 		int len_a = a.end - a.beg;
 		int low = max(i - MAX_COMPARE, 0);
-		int high = min(i + MAX_COMPARE, (int)hg002.size());
+		int high = min(i + MAX_COMPARE, m);
 		for (int j = low; j < high; j++) {
 			const SplitInterval &b = hg002[j];
 			if ((a.is_prefix ^ b.is_prefix) != 1) continue; // Prefix matches suffix
@@ -1889,14 +1890,75 @@ void compare_split_intervals() {
 			matrix[i][j] = score;
 		}
 	}
-	for (int i = 0; i < chm13.size(); i++) {
-		for (int j = 0; j < hg002.size(); j++) {
-			if (matrix[i][j] != -INF) {
-				cout << i << "\t" << j << "\t" << matrix[i][j] << endl;
+	fprintf(stderr, "Compare split intervals: %.2f CPU time, %.2f real time\n", cputime() - c_start, realtime() - r_start);
+
+	// for (int i = 0; i < n; i++) {
+	// 	for (int j = 0; j < m; j++) {
+	// 		if (matrix[i][j] != -INF) {
+	// 			cout << i << "\t" << j << "\t" << matrix[i][j] << endl;
+	// 		}
+	// 	}
+	// }
+
+	// How to set the penalty of deleting units?
+	const int DEL_UNIT = -20;
+	const int VERTICAL = 1;
+	const int HORIZONTAL = 2;
+	const int DIAGONAL = 3;
+	vector<vector<int>> dp(n + 1);
+	vector<vector<uint8_t>> bt(n + 1);
+	for (int i = 0; i <= n; i++) {
+		dp[i].resize(m + 1, -INF);
+		bt[i].resize(m + 1, 0);
+	}
+	dp[0][0] = 0;
+	for (int j = 1; j <= m; j++) {
+		dp[0][j] = DEL_UNIT * j;
+	}
+	for (int i = 1; i <= n; i++) {
+		dp[i][0] = DEL_UNIT * i;
+		for (int j = 1; j <= m; j++) {
+			int v = dp[i-1][j] + DEL_UNIT;
+			int h = dp[i][j-1] + DEL_UNIT;
+			int d = dp[i-1][j-1] + matrix[i-1][j-1];
+			if (v > dp[i][j]) {
+				dp[i][j] = v;
+				bt[i][j] = VERTICAL;
+			}
+			if (h > dp[i][j]) {
+				dp[i][j] = h;
+				bt[i][j] = HORIZONTAL;
+			}
+			if (d > dp[i][j]) {
+				dp[i][j] = d;
+				bt[i][j] = DIAGONAL;
 			}
 		}
 	}
-	fprintf(stderr, "%.2f CPU time, %.2f real time\n", cputime() - c_start, realtime() - r_start);
+	cout << dp[n][m] << endl;
+
+	int pi = n, pj = m;
+	int match_n = 0, del_n = 0, ins_n = 0;
+	while (bt[pi][pj] != 0) {
+		switch (bt[pi][pj]) {
+		case DIAGONAL:
+			match_n++;
+			pi--;
+			pj--;
+			break;
+		case VERTICAL:
+			del_n++;
+			pi--;
+			break;
+		case HORIZONTAL:
+			ins_n++;
+			pj--;
+			break;
+		default:
+			break;
+		}
+	}
+	fprintf(stderr, "match=%d, del=%d, ins=%d\n", match_n, del_n, ins_n);
 }
 
 void test(const char *fn1, int offset, int n) {
