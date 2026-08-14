@@ -1536,7 +1536,8 @@ struct LocalResult {
 	int beg_b, end_b;
 };
 
-LocalResult local_alignment(int n, const char *a, int m, const char *b)
+// Use SIMD or other methods to accelerate it (banded alignment generates poor results)
+LocalResult local_alignment(const int n, const char *a, const int m, const char *b)
 {
 	// Classical SI score matrix
 	const int MAT_S = 1;
@@ -1549,10 +1550,8 @@ LocalResult local_alignment(int n, const char *a, int m, const char *b)
 	const int HORIZONTAL = 2;
 	const int DIAGONAL = 3;
 
-	int *prev_H = (int*) calloc(m + 1, sizeof(int));
-	int *curr_H = (int*) calloc(m + 1, sizeof(int));
-	int *prev_E = (int*) calloc(m + 1, sizeof(int));
-	int *curr_E = (int*) calloc(m + 1, sizeof(int));
+	vector<int> prev_H(m + 1, 0), curr_H(m + 1, 0);
+	vector<int> prev_E(m + 1, 0), curr_E(m + 1, 0);
 	vector<vector<uint8_t>> bt(n + 1);
 	for (int i = 0; i <= n; i++) bt[i].resize(m + 1, STOP);
 	int max_score = -1;
@@ -1560,7 +1559,7 @@ LocalResult local_alignment(int n, const char *a, int m, const char *b)
 
 	for (int i = 1; i <= n; i++) {
 		int F = 0;
-		memset(curr_H, 0, (m + 1) * sizeof(int));
+		memset(curr_H.data(), 0, (m + 1) * sizeof(int));
 		for (int j = 1; j <= m; j++) {
 			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
 			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
@@ -1586,10 +1585,6 @@ LocalResult local_alignment(int n, const char *a, int m, const char *b)
 		swap(prev_H, curr_H);
 		swap(prev_E, curr_E);
 	}
-	free(prev_H);
-	free(curr_H);
-	free(prev_E);
-	free(curr_E);
 
 	int pi = end_i, pj = end_j;
 	string ext_a, ext_b, align;
@@ -1631,6 +1626,56 @@ LocalResult local_alignment(int n, const char *a, int m, const char *b)
 	ret.end_b = end_j;
 	return ret;
 }
+
+int global_alignment(const int n, const char *a, const int m, const char *b)
+{
+	const double GAP_RATIO = 0.10;
+	const int w = max(n, m) * GAP_RATIO;
+
+	// Classical SI score matrix
+	const int MAT_S = 1;
+	const int MIS_P = -4;
+	const int GAP_O = -6;
+	const int GAP_E = -1;
+
+	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
+	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
+	prev_H[0] = 0;
+	for (int i = 1; i <= m; i++) {
+		prev_H[i] = prev_E[i] = GAP_O + i * GAP_E;
+	}
+
+	int ret = -INF;
+	for (int i = 1; i <= n; i++) {
+		int beg = max(i - w, 1), end = min(i + w, m);
+		if (beg > end) break;
+		if (beg == 1) curr_H[beg-1] = GAP_O + i * GAP_E;
+		else curr_H[beg-1] = -INF;
+		int F = -INF;
+		int max_score = -INF;
+		for (int j = beg; j <= end; j++) {
+			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
+			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
+			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
+			curr_H[j] = max(F, M);
+			curr_H[j] = max(curr_H[j], curr_E[j]);
+			max_score = max(max_score, curr_H[j]);
+		}
+		if (end < m) curr_H[end+1] = curr_E[end+1] = -INF;
+		if (max_score == -INF) break;
+		if (i == n and end == m) ret = curr_H[m];
+
+		swap(prev_H, curr_H);
+		swap(prev_E, curr_E);
+	}
+	if (ret < 0) ret = -INF;
+	return ret;
+}
+
+struct SplitInterval {
+	int beg, end;
+	bool is_prefix;
+};
 
 void dev_stage3() {
 	FILE *f = fopen("pairwise/chm13.txt", "r");
@@ -1681,56 +1726,177 @@ void dev_stage3() {
 	ZigOptions opt;
 	const int MAX_COMPARE = 30;
 	const int MARGIN = 5;
+	const int MAX_DISTANCE = 80000;
 	const double MIN_MATCH_RATIO = 0.5;
 
-	int *count_chm13 = (int*) calloc(chm13_len, sizeof(int));
-	int *count_hg002 = (int*) calloc(hg002_len, sizeof(int));
+	int n_threads = opt.n_threads;
+	vector<int> count_chm13(chm13_len, 0);
+	vector<int> count_hg002(hg002_len, 0);
+	vector<int> count_bin[n_threads];
+	for (int i = 0; i < n_threads; i++) count_bin[i].resize(hg002_len, 0);
+	double c_start = cputime(), r_start = realtime();
+	omp_set_num_threads(8);
+	#pragma omp parallel for
 	for (int i = 0; i < chm13_intvs.size(); i++) {
 		const RepInterval &a = chm13_intvs[i];
 		int len_a = a.end - a.beg;
 		int low = max(i - MAX_COMPARE, 0);
 		int high = min(i + MAX_COMPARE, (int)hg002_intvs.size());
-		int local_cnt[len_a];
-		memset(local_cnt, 0, sizeof(local_cnt));
 		for (int j = low; j < high; j++) {
 			const RepInterval &b = hg002_intvs[j];
 			int len_b = b.end - b.beg;
-			// TODO: use banded alignment to accelerate it
+			if (1.0 * abs(len_a - len_b) / min(len_a, len_b) > 0.1) continue;
+			if (abs(a.beg - b.end) > MAX_DISTANCE) continue;
 			LocalResult res = local_alignment(len_a, chm13_seq + a.beg, len_b, hg002_seq + b.beg);
 			int bp_a = -1, bp_b = -1;
 			double ratio_a = 1.0 * (res.end_a - res.beg_a) / (a.end - a.beg);
 			double ratio_b = 1.0 * (res.end_b - res.beg_b) / (b.end - b.beg);
-			if (res.beg_a < MARGIN) bp_a = res.end_a - 1;
+			if (res.beg_a < MARGIN) bp_a = res.end_a;
 			else if (len_a - res.end_a < MARGIN) bp_a = res.beg_a;
-			if (res.beg_b < MARGIN) bp_b = res.end_b - 1;
+			if (res.beg_b < MARGIN) bp_b = res.end_b;
 			else if (len_b - res.end_b < MARGIN) bp_b = res.beg_b;
+			if (bp_a == 0 or bp_a == len_a) bp_a = -1;
+			if (bp_b == 0 or bp_b == len_b) bp_b = -1;
 			// At least 50% prefix-suffix match
 			if (ratio_a > MIN_MATCH_RATIO and ratio_b > MIN_MATCH_RATIO and bp_a != -1 and bp_b != -1) {
-				local_cnt[bp_a]++;
-				// count_chm13[a.beg + bp_a]++;
-				// count_hg002[b.beg + bp_b]++;
+				count_chm13[a.beg + bp_a]++;
+				int tid = omp_get_thread_num();
+				count_bin[tid][b.beg + bp_b]++;
 			}
 		}
-		// for (int j = 0; j < len_a; j++) {
-		// 	if (local_cnt[j]) {
-		// 		printf("j=%d, cnt=%d\n", j, local_cnt[j]);
-		// 	}
-		// }
-		// printf("\n");
 	}
-	exit(1);
+	#pragma omp parallel for
+	for (int i = 0; i < hg002_len; i++) {
+		for (int j = 0; j < n_threads; j++) {
+			count_hg002[i] += count_bin[j][i];
+		}
+	}
+	fprintf(stderr, "%.2f CPU sec, %.2f real sec\n", cputime() - c_start, realtime() - r_start);
 	printf("CHM13 repeat rotations\n");
+	vector<SplitInterval> chm13_si;
 	for (const RepInterval &r: chm13_intvs) {
-		printf("%d %d\n", r.beg, r.end);
+		int max_value = 0, max_id = -1;
 		for (int i = r.beg; i < r.end; i++) {
-			if (count_chm13[i]) {
-				printf("i=%d, count=%d\n", i, count_chm13[i]);
+			if (count_chm13[i] > max_value) {
+				max_value = count_chm13[i];
+				max_id = i;
 			}
 		}
-		printf("\n");
+		if (max_id != -1) {
+			SplitInterval si;
+			si.beg = r.beg;
+			si.end = max_id;
+			si.is_prefix = true;
+			chm13_si.push_back(si);
+			si.beg = max_id;
+			si.end = r.end;
+			si.is_prefix = false;
+			chm13_si.push_back(si);
+		}
 	}
-	free(count_chm13);
-	free(count_hg002);
+	fprintf(stderr, "CHM13 Split %ld intervals to %ld\n", chm13_intvs.size(), chm13_si.size());
+	ofstream out("pairwise/chm13_si.txt");
+	assert(out.is_open());
+	for (const SplitInterval &s: chm13_si) {
+		out << s.beg << "\t" << s.end << "\t" << s.is_prefix << endl;
+	}
+	out.close();
+
+	printf("HG002 repeat rotations\n");
+	vector<SplitInterval> hg002_si;
+	for (const RepInterval &r: hg002_intvs) {
+		int max_value = 0, max_id = -1;
+		for (int i = r.beg; i < r.end; i++) {
+			if (count_hg002[i] > max_value) {
+				max_value = count_hg002[i];
+				max_id = i;
+			}
+		}
+		if (max_id != -1) {
+			SplitInterval si;
+			si.beg = r.beg;
+			si.end = max_id;
+			si.is_prefix = true;
+			hg002_si.push_back(si);
+			si.beg = max_id;
+			si.end = r.end;
+			si.is_prefix = false;
+			hg002_si.push_back(si);
+		}
+	}
+	fprintf(stderr, "HG002 Split %ld intervals to %ld\n", hg002_intvs.size(), hg002_si.size());
+	out.open("pairwise/hg002_si.txt");
+	assert(out.is_open());
+	for (const SplitInterval &s: hg002_si) {
+		out << s.beg << "\t" << s.end << "\t" << s.is_prefix << endl;
+	}
+	out.close();
+}
+
+void compare_split_intervals() {
+	ifstream in("pairwise/chm13_si.txt");
+	assert(in.is_open());
+	SplitInterval tmp;
+	vector<SplitInterval> chm13;
+	while (in >> tmp.beg >> tmp.end >> tmp.is_prefix) {
+		chm13.push_back(tmp);
+	}
+	in.close();
+	fprintf(stderr, "CHM13 %ld split intervals\n", chm13.size());
+
+	in.open("pairwise/hg002_si.txt");
+	assert(in.is_open());
+	vector<SplitInterval> hg002;
+	while (in >> tmp.beg >> tmp.end >> tmp.is_prefix) {
+		hg002.push_back(tmp);
+	}
+	in.close();
+	fprintf(stderr, "CHM13 %ld split intervals\n", hg002.size());
+
+	pair<string,string> pair1 = input_fasta_seq("pairwise/chm13_cenX.fa");
+	int chm13_len = pair1.second.length();
+	const char *chm13_seq = pair1.second.data();
+	fprintf(stderr, "CHM13 length: %d\n", chm13_len);
+
+	pair<string,string> pair2 = input_fasta_seq("pairwise/hg002_cenX.fa");
+	int hg002_len = pair2.second.length();
+	const char *hg002_seq = pair2.second.data();
+	fprintf(stderr, "HG002 length: %d\n", hg002_len);
+
+	double c_start = cputime(), r_start = realtime();
+	// Scoring matrix between repeat units
+	vector<vector<int>> matrix(chm13.size());
+	for (int i = 0; i < chm13.size(); i++) {
+		matrix[i].resize(hg002.size(), -INF);
+	}
+	const int MAX_COMPARE = 60;
+	const int MAX_DISTANCE = 80000;
+	omp_set_num_threads(8);
+	#pragma omp parallel for
+	for (int i = 0; i < chm13.size(); i++) {
+		const SplitInterval &a = chm13[i];
+		int len_a = a.end - a.beg;
+		int low = max(i - MAX_COMPARE, 0);
+		int high = min(i + MAX_COMPARE, (int)hg002.size());
+		for (int j = low; j < high; j++) {
+			const SplitInterval &b = hg002[j];
+			if ((a.is_prefix ^ b.is_prefix) != 1) continue; // Prefix matches suffix
+			int len_b = b.end - b.beg;
+			if (1.0 * abs(len_a - len_b) / min(len_a, len_b) > 0.1) continue;
+			if (abs(a.beg - b.end) > MAX_DISTANCE) continue;
+			int score = global_alignment(len_a, chm13_seq + a.beg, len_b, hg002_seq + b.beg);
+			// fprintf(stdout, "[%d, %d) aln [%d, %d) score=%d\n", a.beg, a.end, b.beg, b.end, score);
+			matrix[i][j] = score;
+		}
+	}
+	for (int i = 0; i < chm13.size(); i++) {
+		for (int j = 0; j < hg002.size(); j++) {
+			if (matrix[i][j] != -INF) {
+				cout << i << "\t" << j << "\t" << matrix[i][j] << endl;
+			}
+		}
+	}
+	fprintf(stderr, "%.2f CPU time, %.2f real time\n", cputime() - c_start, realtime() - r_start);
 }
 
 void test(const char *fn1, int offset, int n) {
@@ -1744,7 +1910,8 @@ void test(const char *fn1, int offset, int n) {
 }
 
 int main(int argc, char *argv[]) {
-	dev_stage3();
+	compare_split_intervals();
+	// dev_stage3();
 	return 1;
 
 	double ctime = cputime(), rtime = realtime();
