@@ -1668,7 +1668,107 @@ int global_alignment(const int n, const char *a, const int m, const char *b)
 		swap(prev_H, curr_H);
 		swap(prev_E, curr_E);
 	}
-	if (ret < 0) ret = -INF;
+	// if (ret < 0) ret = -INF;
+	return ret;
+}
+
+struct AlnSta {
+	int match, mismatch, ins, del;
+	AlnSta() {
+		match = mismatch = ins = del = 0;
+	}
+	void operator += (const AlnSta &b) {
+		this->match += b.match;
+		this->mismatch += b.mismatch;
+		this->ins += b.ins;
+		this->del += b.del;
+	}
+};
+
+AlnSta global_cigar(const int n, const char *a, const int m, const char *b)
+{
+	const double GAP_RATIO = 0.10;
+	const int w = max(n, m) * GAP_RATIO;
+
+	// Classical SI score matrix
+	const int MAT_S = 1;
+	const int MIS_P = -4;
+	const int GAP_O = -6;
+	const int GAP_E = -1;
+	const int VERTICAL = 1;
+	const int HORIZONTAL = 2;
+	const int DIAGONAL = 3;
+
+	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
+	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
+	prev_H[0] = 0;
+	for (int i = 1; i <= m; i++) {
+		prev_H[i] = prev_E[i] = GAP_O + i * GAP_E;
+	}
+	vector<vector<uint8_t>> bt(n + 1);
+	for (int i = 0; i <= n; i++) {
+		bt[i].resize(m + 1, 0);
+	}
+
+	for (int i = 1; i <= n; i++) {
+		int beg = max(i - w, 1), end = min(i + w, m);
+		if (beg > end) break;
+		// beg = 1; end = m;
+		if (beg == 1) curr_H[beg-1] = GAP_O + i * GAP_E;
+		else curr_H[beg-1] = -INF;
+		int F = -INF;
+		int max_score = -INF;
+		for (int j = beg; j <= end; j++) {
+			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
+			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
+			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
+			if (F > M) {
+				curr_H[j] = F;
+				bt[i][j] = HORIZONTAL;
+			} else {
+				curr_H[j] = M;
+				bt[i][j] = DIAGONAL;
+			}
+			if (curr_E[j] > curr_H[j]) {
+				curr_H[j] = curr_E[j];
+				bt[i][j] = VERTICAL;
+			}
+			max_score = max(max_score, curr_H[j]);
+		}
+		if (end < m) curr_H[end+1] = curr_E[end+1] = -INF;
+		if (max_score == -INF) break;
+
+		swap(prev_H, curr_H);
+		swap(prev_E, curr_E);
+	}
+
+	assert(prev_H[m] != -INF);
+
+	AlnSta ret;
+	int pi = n, pj = m;
+	while (bt[pi][pj] != 0) {
+		switch (bt[pi][pj]) {
+		case DIAGONAL:
+			pi--;
+			pj--;
+			if (a[pi] == b[pj]) ret.match++;
+			else ret.mismatch++;
+			break;
+		case VERTICAL:
+			pi--;
+			ret.del++;
+			break;
+		case HORIZONTAL:
+			pj--;
+			ret.ins++;
+			break;
+		default:
+			break;
+		}
+	}
+	// Be careful with the preceding gaps, which are introduced by wrong splitting
+	ret.ins += pi;
+	ret.del += pj;
 	return ret;
 }
 
@@ -1937,6 +2037,9 @@ void compare_split_intervals() {
 	}
 	cout << dp[n][m] << endl;
 
+	vector<pair<int,int>> aln;
+	vector<int> chm13_del;
+	vector<int> hg002_del;
 	int pi = n, pj = m;
 	int match_n = 0, del_n = 0, ins_n = 0;
 	while (bt[pi][pj] != 0) {
@@ -1945,20 +2048,89 @@ void compare_split_intervals() {
 			match_n++;
 			pi--;
 			pj--;
+			aln.emplace_back(make_pair(pi, pj));
 			break;
 		case VERTICAL:
 			del_n++;
 			pi--;
+			chm13_del.push_back(pi);
 			break;
 		case HORIZONTAL:
 			ins_n++;
 			pj--;
+			hg002_del.push_back(pj);
 			break;
 		default:
 			break;
 		}
 	}
 	fprintf(stderr, "match=%d, del=%d, ins=%d\n", match_n, del_n, ins_n);
+
+	int aln_len = 0, c13_del_len = 0, h02_del_len = 0;
+	reverse(aln.begin(), aln.end());
+	reverse(chm13_del.begin(), chm13_del.end());
+	reverse(hg002_del.begin(), hg002_del.end());
+
+	fprintf(stdout, "Aligned:\n");
+	AlnSta mut;
+	for (const pair<int,int> &p: aln) {
+		int i = p.first, j = p.second;
+		const SplitInterval &c = chm13[i];
+		const SplitInterval &h = hg002[j];
+		fprintf(stdout, "%d [%d][%d, %d) len=%d, %d [%d][%d, %d) len=%d\n",
+			i, c.is_prefix, c.beg, c.end, c.end - c.beg, j, h.is_prefix, h.beg, h.end, h.end - h.beg);
+		aln_len += min(c.end - c.beg, h.end - h.beg);
+		AlnSta res = global_cigar(c.end - c.beg, chm13_seq + c.beg, h.end - h.beg, hg002_seq + h.beg);
+		mut += res;
+	}
+	fprintf(stderr, "aln length: %d\n", aln_len);
+	fprintf(stderr, "matches: %d, mismatches: %d, insertions: %d, deletions: %d\n",
+		mut.match, mut.mismatch, mut.ins, mut.del);
+
+	fprintf(stdout, "CHM13 deleted\n");
+	for (int i: chm13_del) {
+		const SplitInterval &c = chm13[i];
+		fprintf(stdout, "%d [%d][%d, %d) len=%d\n", i, c.is_prefix, c.beg, c.end, c.end - c.beg);
+		c13_del_len += c.end - c.beg;
+	}
+	fprintf(stderr, "del length: %d\n", c13_del_len);
+
+	// How many parts are deleted
+	{
+		int x = chm13_del.size() - 2, y = 0;
+		for (int i = 1; i < chm13_del.size() - 1; i++) {
+			const SplitInterval &l = chm13[chm13_del[i-1]];
+			const SplitInterval &c = chm13[chm13_del[i]];
+			const SplitInterval &r = chm13[chm13_del[i+1]];
+			bool ok = false;
+			if (chm13_del[i] == chm13_del[i-1] + 1 and (l.is_prefix ^ c.is_prefix) == 1) ok = true;
+			if (chm13_del[i] == chm13_del[i+1] - 1 and (c.is_prefix ^ r.is_prefix) == 1) ok = true;
+			if (not ok) y++;
+		}
+		fprintf(stderr, "CHM13 deleted parts: %d / %d\n", y, x);
+	}
+
+	fprintf(stdout, "HG002 deleted\n");
+	for (int j: hg002_del) {
+		const SplitInterval &h = hg002[j];
+		fprintf(stdout, "%d [%d][%d, %d) len=%d\n", j, h.is_prefix, h.beg, h.end, h.end - h.beg);
+		h02_del_len += h.end - h.beg;
+	}
+	fprintf(stderr, "ins length: %d\n", h02_del_len);
+
+	{
+		int x = hg002_del.size() - 2, y = 0;
+		for (int i = 1; i < hg002_del.size() - 1; i++) {
+			const SplitInterval &l = hg002[hg002_del[i-1]];
+			const SplitInterval &c = hg002[hg002_del[i]];
+			const SplitInterval &r = hg002[hg002_del[i+1]];
+			bool ok = false;
+			if (hg002_del[i] == hg002_del[i-1] + 1 and (l.is_prefix ^ c.is_prefix) == 1) ok = true;
+			if (hg002_del[i] == hg002_del[i+1] - 1 and (c.is_prefix ^ r.is_prefix) == 1) ok = true;
+			if (not ok) y++;
+		}
+		fprintf(stderr, "HG002 deleted parts: %d / %d\n", y, x);
+	}
 }
 
 void test(const char *fn1, int offset, int n) {
