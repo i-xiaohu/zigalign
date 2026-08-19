@@ -2081,6 +2081,8 @@ void compare_split_intervals() {
 			i, c.is_prefix, c.beg, c.end, c.end - c.beg, j, h.is_prefix, h.beg, h.end, h.end - h.beg);
 		aln_len += min(c.end - c.beg, h.end - h.beg);
 		AlnSta res = global_cigar(c.end - c.beg, chm13_seq + c.beg, h.end - h.beg, hg002_seq + h.beg);
+		fprintf(stdout, "matches: %d, mismatches: %d, insertions: %d, deletions: %d\n",
+			res.match, res.mismatch, res.ins, res.del);
 		mut += res;
 	}
 	fprintf(stderr, "aln length: %d\n", aln_len);
@@ -2131,6 +2133,37 @@ void compare_split_intervals() {
 		}
 		fprintf(stderr, "HG002 deleted parts: %d / %d\n", y, x);
 	}
+
+	ofstream out3("pairwise/cut_chm13.fa");
+	assert(out3.is_open());
+	out3 << ">aligned_HOR_chm13" << endl;
+	ofstream out2("pairwise/cut_hg002.fa");
+	assert(out2.is_open());
+	out2 << ">aligned_HOR_hg002" << endl;
+	ofstream out("pairwise/vis.txt");
+	assert(out.is_open());
+	int last_c = 0, last_h = 0;
+	for (const pair<int,int> &p: aln) {
+		int i = p.first, j = p.second;
+		const SplitInterval &c = chm13[i];
+		const SplitInterval &h = hg002[j];
+		out << c.beg << " " << h.beg << " " << c.end << " " << h.end << endl;
+		assert(c.beg >= last_c);
+		for (int k = c.beg; k < c.end; k++) {
+			out3 << chm13_seq[k];
+		}
+		last_c = c.end;
+		assert(h.beg >= last_h);
+		for (int k = h.beg; k < h.end; k++) {
+			out2 << hg002_seq[k];
+		}
+		last_h = h.end;
+	}
+	out3 << endl;
+	out2 << endl;
+	out3.close();
+	out2.close();
+	out.close();
 }
 
 void test(const char *fn1, int offset, int n) {
