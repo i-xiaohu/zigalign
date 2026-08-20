@@ -6,25 +6,23 @@ from Bio import SeqIO
 
 def main(seq_fn: str, ann_fn: str, chr_name: str, out_fn: str):
     cen_start, cen_end = -1, -1
-    max_active = 0
     with open(ann_fn, 'r') as f:
         for line in f:
             cols = line.split()
             chrom, start, end = cols[0], int(cols[1]), int(cols[2])
             name, score = cols[3], int(cols[4])
             rgb = [int(i) for i in cols[-1].split(',')]
-            # Pure red indicates active centromere regions
+            # Pure red indicates active centromere regions; choose the leftmost and the rightmost positions
             if chrom == chr_name and rgb[0] == 153 and rgb[1] == 0 and rgb[2] == 0:
+                if cen_start == -1:
+                    cen_start = start
+                cen_end = end
                 print('Active region [%d,%d), name=%s, length=%d'
                       % (start, end, name, end - start))
-                if end - start > max_active:
-                    max_active = end - start
-                    cen_start = start
-                    cen_end = end
     if cen_end - cen_start == 0:
         print('Found no centromere on %s' % chr_name)
         return
-    print('Choose the active region [%d,%d) with max length %d' % (cen_start, cen_end, cen_end - cen_start))
+    print('Choose the centromere region [%d,%d), length %d' % (cen_start, cen_end, cen_end - cen_start))
 
     with gzip.open(seq_fn, 'rt') as handle:
         for record in SeqIO.parse(handle, "fasta"):
