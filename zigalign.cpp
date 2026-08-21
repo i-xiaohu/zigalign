@@ -21,12 +21,12 @@ const int INF = 100000000;
 const uint16_t SA_MAX_LEN = 50000; // Self-alignment max length
 const int PART_LEN = 40000;
 const int STEP_LEN = 20000;
-
 const int NORMAL = 0;
 const int START_REP = 1;
 const int NEW_COPY = 2;
 const int WITHIN_REP = 3;
 const int END_REP = 4;
+const int MAX_UNIT_DIS = 100000;
 
 const bool DEBUG = false;
 
@@ -551,6 +551,7 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		r.beg--;
 		r.end--;
 	}
+	sort(all_reps.begin(), all_reps.end());
 	return all_reps;
 }
 
@@ -1733,15 +1734,17 @@ AlnSta global_cigar(const int n, const char *a, const int m, const char *b)
 struct SplitInterval {
 	int beg, end;
 	bool is_prefix;
+
+	bool operator < (const SplitInterval &b) const {
+		return (this->beg != b.beg) ? this->beg < b.beg : this->end < b.end;
+	}
 };
 
 pair<vector<SplitInterval>, vector<SplitInterval>> split_repeats(const ZigOptions &opt,
 	int t_len, const char *t_seq, const vector<RepInterval> &t_reps,
 	int q_len, const char *q_seq, const vector<RepInterval> &q_reps)
 {
-	const int MAX_COMPARE = 30; // Is it enough?
 	const int MARGIN = 5;
-	const int MAX_DISTANCE = 80000;
 	const double MAX_LENGTH_DIFF = 0.1;
 	const double MIN_MATCH_RATIO = 0.5;
 
@@ -1755,13 +1758,15 @@ pair<vector<SplitInterval>, vector<SplitInterval>> split_repeats(const ZigOption
 	for (int i = 0; i < t_reps.size(); i++) {
 		const RepInterval &a = t_reps[i];
 		int len_a = a.end - a.beg;
-		int low = max(i - MAX_COMPARE, 0);
-		int high = min(i + MAX_COMPARE, (int)q_reps.size());
-		for (int j = low; j < high; j++) {
-			const RepInterval &b = q_reps[j];
+		RepInterval lb, ub;
+		lb.beg = lb.end = a.beg - MAX_UNIT_DIS;
+		ub.beg = ub.end = a.end + MAX_UNIT_DIS;
+		auto low = lower_bound(q_reps.begin(), q_reps.end(), lb);
+		auto high = lower_bound(q_reps.begin(), q_reps.end(), ub);
+		for (auto it = low; it < high; ++it) {
+			const RepInterval &b = *it;
 			int len_b = b.end - b.beg;
 			if (1.0 * abs(len_a - len_b) / min(len_a, len_b) > MAX_LENGTH_DIFF) continue;
-			if (abs(a.beg - b.end) > MAX_DISTANCE) continue;
 			LocalResult res = local_alignment(len_a, t_seq + a.beg, len_b, q_seq + b.beg);
 			int bp_a = -1, bp_b = -1;
 			double ratio_a = 1.0 * (res.end_a - res.beg_a) / (a.end - a.beg);
@@ -1848,6 +1853,28 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 
 	vector<RepInterval> t_reps = collect_long_repeats(opt, t_len, t_seq);
 	vector<RepInterval> q_reps = collect_long_repeats(opt, q_len, q_seq);
+	if (opt.log_prefix) {
+		FILE* fo = fopen((string(opt.log_prefix) + "_t_reps.tsv").c_str(), "w");
+		assert(fo);
+		fprintf(fo, "%s\t%s\t%s\n", "beg", "end", "length");
+		for (const RepInterval &r: t_reps) {
+			fprintf(fo, "%d\t%d\t%d\n", r.beg, r.end, r.end - r.beg);
+		}
+		fclose(fo);
+
+		fo = fopen((string(opt.log_prefix) + "_q_reps.tsv").c_str(), "w");
+		assert(fo);
+		fprintf(fo, "%s\t%s\t%s\n", "beg", "end", "length");
+		for (const RepInterval &r: q_reps) {
+			fprintf(fo, "%d\t%d\t%d\n", r.beg, r.end, r.end - r.beg);
+		}
+		fclose(fo);
+	}
+	int t_sum = 0, q_sum = 0;
+	for (const RepInterval &r: t_reps) t_sum += r.end - r.beg;
+	for (const RepInterval &r: q_reps) q_sum += r.end - r.beg;
+	fprintf(stderr, "Target repeat fraction[%%]: %.2f\n", 100.0 * t_sum / t_len);
+	fprintf(stderr, "Query repeat fraction[%%]: %.2f\n", 100.0 * q_sum / q_len);
 
 	auto si = split_repeats(opt, t_len, t_seq, t_reps, q_len, q_seq, q_reps);
 	vector<SplitInterval> &t_si = si.first;
@@ -1858,28 +1885,29 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	const int n = t_si.size(), m = q_si.size();
 	vector<vector<int>> matrix(n);
 	for (int i = 0; i < n; i++) matrix[i].resize(m, -INF);
-	const int MAX_COMPARE = 60; // Doubled because of splitting
-	const int MAX_DISTANCE = 80000;
 	#pragma omp parallel for
 	for (int i = 0; i < n; i++) {
 		const SplitInterval &a = t_si[i];
 		int len_a = a.end - a.beg;
-		int low = max(i - MAX_COMPARE, 0);
-		int high = min(i + MAX_COMPARE, m);
-		for (int j = low; j < high; j++) {
-			const SplitInterval &b = q_si[j];
+		SplitInterval lb, ub;
+		lb.beg = lb.end = a.beg - MAX_UNIT_DIS;
+		ub.beg = ub.end = a.end + MAX_UNIT_DIS;
+		auto low = lower_bound(q_si.begin(), q_si.end(), lb);
+		auto high = lower_bound(q_si.begin(), q_si.end(), ub);
+		for (auto it = low; it < high; ++it) {
+			const SplitInterval &b = *it;
 			if ((a.is_prefix ^ b.is_prefix) != 1) continue; // Prefix matches suffix
 			int len_b = b.end - b.beg;
 			if (1.0 * abs(len_a - len_b) / min(len_a, len_b) > 0.1) continue;
-			if (abs(a.beg - b.end) > MAX_DISTANCE) continue;
 			int score = global_alignment(len_a, t_seq + a.beg, len_b, q_seq + b.beg);
 			// fprintf(stdout, "[%d, %d) aln [%d, %d) score=%d\n", a.beg, a.end, b.beg, b.end, score);
+			int j = it - q_si.begin();
 			matrix[i][j] = score;
 		}
 	}
 	fprintf(stderr, "Compare split intervals in %.2f CPU time, %.2f real time\n", cputime() - c_start, realtime() - r_start);
 
-	// How to set the penalty of deleting units?
+	// TODO: set the penalty of deleting units
 	const int DEL_UNIT = -20;
 	const int VERTICAL = 1;
 	const int HORIZONTAL = 2;
