@@ -276,6 +276,146 @@ struct RepInterval {
 	}
 };
 
+struct WdpCell {
+	int E, F, H;
+	int pi, pj;
+
+	WdpCell() {
+		E = F = H = -INF;
+		pi = pj = -1;
+	}
+};
+
+void wraparound_dp(const char *ref_seq, int ref_len, const char *que_seq, int que_len)
+{
+	cout << "reference" << endl;
+	for (int i= 0; i < ref_len ;i++) cout << ref_seq[i];
+	cout << endl;
+
+	cout << "query" << endl;
+	for (int i = 0; i < que_len; i++) cout << que_seq[i];
+	cout << endl;
+
+	// Classical SI score matrix
+	const int MAT_S = 1;
+	const int MIS_P = -4;
+	const int GAP_O = -6;
+	const int GAP_E = -1;
+
+	vector<vector<WdpCell>> dp(que_len + 1);
+	for (int i = 0; i <= que_len; i++) {
+		dp[i].resize(ref_len + 1);
+	}
+	dp[0][0].H = 0;
+	for (int j = 1; j <= que_len; j++) {
+		dp[0][j].H = dp[0][j].E = GAP_O + j * GAP_E;
+	}
+	for (int i = 1; i <= que_len; i++) {
+		// First pass
+		dp[i][0].H = GAP_O + i * GAP_E;
+		dp[i][1].F = max(dp[i-1][ref_len].H + GAP_O, dp[i-1][ref_len].F) + GAP_E; // Wrap
+		dp[i][1].E = max(dp[i-1][1].H + GAP_O, dp[i-1][1].E) + GAP_E;
+		int tmp = que_seq[i-1] == ref_seq[0] ?MAT_S :MIS_P;
+		int d1 = dp[i-1][0].H + tmp; // Leading deletions
+		int d2 = dp[i-1][ref_len].H + tmp; // Wrap
+		if (dp[i][1].F > dp[i][1].H) {
+			dp[i][1].H = dp[i][1].F;
+			dp[i][1].pi = i-1;
+			dp[i][1].pj = ref_len;
+		}
+		if (dp[i][1].E > dp[i][1].H) {
+			dp[i][1].H = dp[i][1].E;
+			dp[i][1].pi = i-1;
+			dp[i][1].pj = 1;
+		}
+		if (d1 > dp[i][1].H) {
+			dp[i][1].H = d1;
+			dp[i][1].pi = i-1;
+			dp[i][1].pj = 0;
+		}
+		if (d2 > dp[i][1].H) {
+			dp[i][1].H = d2;
+			dp[i][1].pi = i-1;
+			dp[i][1].pj = ref_len;
+		}
+		for (int j = 2; j <= ref_len; j++) {
+			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
+			dp[i][j].E = max(dp[i-1][j].H + GAP_O, dp[i-1][j].E) + GAP_E;
+			int d = dp[i-1][j-1].H + (que_seq[i-1] == ref_seq[j-1] ?MAT_S : MIS_P);
+			if (dp[i][j].F > dp[i][j].H) {
+				dp[i][j].H = dp[i][j].F;
+				dp[i][j].pi = i;
+				dp[i][j].pj = j-1;
+			}
+			if (dp[i][j].E > dp[i][j].H) {
+				dp[i][j].H = dp[i][j].E;
+				dp[i][j].pi = i-1;
+				dp[i][j].pj = j;
+			}
+			if (d > dp[i][j].H) {
+				dp[i][j].H = d;
+				dp[i][j].pi = i-1;
+				dp[i][j].pj = j-1;
+			}
+		}
+		// Second pass
+		tmp = dp[i][ref_len].H + GAP_O + GAP_E;
+		if (tmp > dp[i][1].F) {
+			dp[i][1].F = tmp;
+		}
+		if (dp[i][1].F > dp[i][1].H) {
+			dp[i][1].H = dp[i][1].F;
+			dp[i][1].pi = i; // Special mark
+			dp[i][1].pj = ref_len;
+		}
+		for (int j = 2; j <= ref_len; j++) {
+			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
+			if (dp[i][j].F > dp[i][j].H) {
+				dp[i][j].H = dp[i][j].F;
+				dp[i][j].pi = i;
+				dp[i][j].pj = j-1;
+			}
+		}
+	}
+	int ti = que_len, tj = ref_len;
+	string a, b;
+	while (ti > 0 and tj > 0) {
+		int pi = dp[ti][tj].pi, pj = dp[ti][tj].pj;
+		if (pi == ti and pj == tj - 1) {
+			a += '-';
+			b += que_seq[tj - 1];
+		} else if (pi == ti - 1 and pj == tj) {
+			a += ref_seq[ti - 1];
+			b += '-';
+		} else if (pi == ti - 1 and pj == tj - 1) {
+			a += ref_seq[ti - 1];
+			b += que_seq[tj - 1];
+		} else if (pi == ti - 1 and pj == ref_len) {
+			assert(tj == 1);
+			a += ref_seq[ti - 1];
+			b += que_seq[tj - 1];
+			a += '|';
+			b += '|';
+	 	} else {
+	 		assert(tj == 1);
+	 		a += ref_seq[ti - 1];
+	 		b += '-';
+	 		a += '|';
+	 		b += '|';
+	 		pi = ti - 1;
+	 	}
+		ti = pi;
+		tj = pj;
+	}
+	cout << a << endl;
+	cout << b << endl;
+}
+
+struct NormalizedReps {
+	int nor_len;
+	//
+};
+
 vector<RepInterval> trace_repeats(uint16_t n, const char *seq, const vector<vector<Bt1Cell>> &bt)
 {
 	int ti = n, tj = n;
@@ -338,11 +478,42 @@ vector<RepInterval> trace_repeats(uint16_t n, const char *seq, const vector<vect
 		i = j;
 	}
 	reps.resize(new_size);
-	// TODO: merge or split repeats
 
-	// for (const RepInterval &r: reps) {
-	// 	printf("[%d, %d) mis=%d, gap=%d\n", r.beg, r.end, r.mis, r.gap);
-	// }
+	// TODO: post-process it using wraparound DP
+	vector<int> len_array;
+	for (const RepInterval &r: reps) {
+		len_array.push_back(r.end - r.beg);
+	}
+	sort(len_array.begin(), len_array.end());
+
+	// Find the median (most frequent) length
+	const double MAX_VAR_RATE = 0.3;
+	int median_len = len_array[len_array.size() >> 1U];
+	const char *ref_seq;
+	int ref_len = -1;
+	for (int i = 0; i < reps.size(); i++) {
+		const RepInterval &r = reps[i];
+		int unit_len = r.end - r.beg;
+		if (abs(median_len - unit_len) < MAX_VAR_RATE * min(median_len, unit_len)) {
+			// Using template in self-alignment as reference
+			if (r.gap == -1) {
+				ref_seq = seq + r.beg;
+				ref_len = r.end - r.beg;
+				break;
+			}
+		}
+	}
+	if (ref_len == -1) return reps;
+	// It is better to use consensus sequence, but it is more complicated and time-consuming
+	for (const RepInterval &r: reps) {
+		int unit_len = r.end - r.beg;
+		if (1.0 * unit_len / ref_len > 2.0 - MAX_VAR_RATE) {
+			const char *unit_seq = seq + r.beg;
+			wraparound_dp(ref_seq, ref_len, unit_seq, unit_len);
+			exit(1);
+		}
+	}
+
 	return reps;
 }
 
@@ -445,25 +616,15 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 	int batch_id = 0;
 	while (offset < n) {
 		double r_start = realtime(), c_start = cputime();
-		int guard = offset + (n_threads - 1) * STEP_LEN + PART_LEN;
-		// fprintf(stderr, "offset = %d, guard = %d\n", offset, guard);
+		int guard = offset + n_threads * PART_LEN;
 		if (guard >= n) break;
 		// Multi-threading DP
 		#pragma omp parallel for
 		for (int i = 0; i < n_threads; i++) {
-			const char *s = seq + offset + i * STEP_LEN;
+			const char *s = seq + offset + i * PART_LEN;
 			self_alignment2(opt, PART_LEN, s, bt_bin[i]);
 			reps_bin[i] = trace_repeats(PART_LEN, s, bt_bin[i]);
 		}
-
-		// for (int i = 0; i < n_threads; i++) {
-		// 	const vector<RepInterval> &bin = reps_bin[i];
-		// 	fprintf(stderr, "thread %d\n", i);
-		// 	for (int j = 0; j < bin.size(); j++) {
-		// 		fprintf(stderr, "@%d %d %d\n", j, bin[j].beg, bin[j].end);
-		// 	}
-		// 	fprintf(stderr, "\n");
-		// }
 
 		// TODO: use thread pipeline
 		// Single-thread Stitching
@@ -2049,7 +2210,7 @@ int main(int argc, char *argv[]) {
 	ZigOptions opt;
 	if (argc == 1) return usage(opt);
 	int c;
-	while ((c = getopt(argc, argv, "A:B:O:E:J:j:u:d:p:a:b:o:e:k:v:")) >= 0) {
+	while ((c = getopt(argc, argv, "A:B:O:E:J:j:u:d:p:a:b:o:e:k:v:t:")) >= 0) {
 		switch (c) {
 			case 'A':
 				opt.mat_score = abs(str2int(optarg));
@@ -2095,6 +2256,9 @@ int main(int argc, char *argv[]) {
 				break;
 			case 'v':
 				opt.log_prefix = optarg;
+				break;
+			case 't':
+				opt.n_threads = abs(str2int(optarg));
 				break;
 			default:
 				fprintf(stderr, "Unrecognized option `%c`\n", c);
