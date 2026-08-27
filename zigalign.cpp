@@ -288,13 +288,8 @@ struct WdpCell {
 
 void wraparound_dp(const char *ref_seq, int ref_len, const char *que_seq, int que_len)
 {
-	cout << "reference" << endl;
-	for (int i= 0; i < ref_len ;i++) cout << ref_seq[i];
-	cout << endl;
-
-	cout << "query" << endl;
-	for (int i = 0; i < que_len; i++) cout << que_seq[i];
-	cout << endl;
+	cout << ref_len << endl;
+	cout << que_len << endl;
 
 	// Classical SI score matrix
 	const int MAT_S = 1;
@@ -307,7 +302,7 @@ void wraparound_dp(const char *ref_seq, int ref_len, const char *que_seq, int qu
 		dp[i].resize(ref_len + 1);
 	}
 	dp[0][0].H = 0;
-	for (int j = 1; j <= que_len; j++) {
+	for (int j = 1; j <= ref_len; j++) {
 		dp[0][j].H = dp[0][j].E = GAP_O + j * GAP_E;
 	}
 	for (int i = 1; i <= que_len; i++) {
@@ -365,11 +360,12 @@ void wraparound_dp(const char *ref_seq, int ref_len, const char *que_seq, int qu
 		}
 		if (dp[i][1].F > dp[i][1].H) {
 			dp[i][1].H = dp[i][1].F;
-			dp[i][1].pi = i; // Special mark
+			dp[i][1].pi = i;
 			dp[i][1].pj = ref_len;
 		}
 		for (int j = 2; j <= ref_len; j++) {
-			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
+			tmp = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
+			dp[i][j].F = max(tmp, dp[i][j].F);
 			if (dp[i][j].F > dp[i][j].H) {
 				dp[i][j].H = dp[i][j].F;
 				dp[i][j].pi = i;
@@ -383,32 +379,106 @@ void wraparound_dp(const char *ref_seq, int ref_len, const char *que_seq, int qu
 		int pi = dp[ti][tj].pi, pj = dp[ti][tj].pj;
 		if (pi == ti and pj == tj - 1) {
 			a += '-';
-			b += que_seq[tj - 1];
+			b += ref_seq[tj - 1];
 		} else if (pi == ti - 1 and pj == tj) {
-			a += ref_seq[ti - 1];
+			a += que_seq[ti - 1];
 			b += '-';
 		} else if (pi == ti - 1 and pj == tj - 1) {
-			a += ref_seq[ti - 1];
-			b += que_seq[tj - 1];
+			a += que_seq[ti - 1];
+			b += ref_seq[tj - 1];
 		} else if (pi == ti - 1 and pj == ref_len) {
 			assert(tj == 1);
-			a += ref_seq[ti - 1];
-			b += que_seq[tj - 1];
+			a += que_seq[ti - 1];
+			b += ref_seq[tj - 1];
 			a += '|';
 			b += '|';
 	 	} else {
 	 		assert(tj == 1);
-	 		a += ref_seq[ti - 1];
-	 		b += '-';
+	 		fprintf(stderr, "on\n");
+	 		a += '-';
+	 		b += ref_seq[tj - 1];
 	 		a += '|';
 	 		b += '|';
-	 		pi = ti - 1;
 	 	}
 		ti = pi;
 		tj = pj;
 	}
-	cout << a << endl;
-	cout << b << endl;
+	while (ti > 0) {
+		a += que_seq[--ti];
+		b += '-';
+	}
+	while (tj > 0) {
+		a += '-';
+		b += ref_seq[--tj];
+	}
+	reverse(a.begin(), a.end());
+	reverse(b.begin(), b.end());
+	// sanity check
+	{
+		assert(a.size() == b.size());
+		string xa;
+		for (char c: a) {
+			if (c != '|' and c != '-') {
+				xa += c;
+			}
+		}
+		string ya;
+		for (int i = 0; i < que_len; i++) {
+			ya += que_seq[i];
+		}
+		assert(xa == ya);
+
+		string xb;
+		for (char c: b) {
+			if (c != '|' and c != '-') {
+				xb += c;
+			}
+		}
+		string yb;
+		for (int i = 0; i < ref_len; i++) {
+			yb += ref_seq[i];
+		}
+		assert(xb.size() % yb.size() == 0);
+		int t = xb.size() / yb.size();
+		for (int i = 0; i < t; i++) {
+			for (int j = 0; j < ref_len; j++) {
+				assert(xb[i * ref_len + j] == yb[j]);
+			}
+		}
+	}
+	// Output
+	vector<string> xa, xb;
+	for (int i = 0; i < a.size(); ) {
+		int end = a.size();
+		for (int j = i; j < a.size(); j++) {
+			if (a[j] == '|') {
+				end = j;
+				break;
+			}
+		}
+		string t = a.substr(i, end - i);
+		xa.push_back(t);
+		i = end + 1;
+	}
+	for (int i = 0; i < b.size(); ) {
+		int end = b.size();
+		for (int j = i; j < b.size(); j++) {
+			if (b[j] == '|') {
+				end = j;
+				break;
+			}
+		}
+		string t = b.substr(i, end - i);
+		xb.push_back(t);
+		i = end + 1;
+	}
+	for (int i = 0; i < xa.size(); i++) {
+		const string &ta = xa[i];
+		const string &tb = xb[i];
+		cout << ta << endl;
+		cout << tb << endl;
+		cout << endl;
+	}
 }
 
 struct NormalizedReps {
@@ -489,28 +559,35 @@ vector<RepInterval> trace_repeats(uint16_t n, const char *seq, const vector<vect
 	// Find the median (most frequent) length
 	const double MAX_VAR_RATE = 0.3;
 	int median_len = len_array[len_array.size() >> 1U];
-	const char *ref_seq;
+	cout << median_len << endl;
+	const char *ref_seq = nullptr;
 	int ref_len = -1;
-	for (int i = 0; i < reps.size(); i++) {
-		const RepInterval &r = reps[i];
+	for (const RepInterval &r : reps) {
 		int unit_len = r.end - r.beg;
-		if (abs(median_len - unit_len) < MAX_VAR_RATE * min(median_len, unit_len)) {
-			// Using template in self-alignment as reference
-			if (r.gap == -1) {
-				ref_seq = seq + r.beg;
-				ref_len = r.end - r.beg;
-				break;
-			}
+		if (unit_len == median_len) {
+			ref_seq = seq + r.beg;
+			ref_len = r.end - r.beg;
+			break;
 		}
 	}
-	if (ref_len == -1) return reps;
+	if (ref_seq == nullptr) return reps;
 	// It is better to use consensus sequence, but it is more complicated and time-consuming
+	bool check = false;
 	for (const RepInterval &r: reps) {
+		if (check) {
+			cout << "the unit after wdp" << endl;
+			for (int i = r.beg; i < r.end; i++) {
+				cout << seq[i];
+			}
+			cout << endl;
+			cout << endl;
+			check = false;
+		}
 		int unit_len = r.end - r.beg;
 		if (1.0 * unit_len / ref_len > 2.0 - MAX_VAR_RATE) {
 			const char *unit_seq = seq + r.beg;
 			wraparound_dp(ref_seq, ref_len, unit_seq, unit_len);
-			exit(1);
+			check = true;
 		}
 	}
 
@@ -628,30 +705,7 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 
 		// TODO: use thread pipeline
 		// Single-thread Stitching
-		int shift_pos = 0;
 		int added_reps = 0;
-		for (int i = 0; i < n_threads; i++) {
-			// fprintf(stderr, "i=%d, shift = %d\n", i, shift_pos);
-			if (shift_pos) {
-				reps_bin[i] = shift_repeats(PART_LEN, reps_bin[i], bt_bin[i], shift_pos);
-			}
-			for (const RepInterval &r: reps_bin[i]) {
-				RepInterval x = r;
-				x.beg += offset + i * STEP_LEN;
-				x.end += offset + i * STEP_LEN;
-				all_reps.push_back(x);
-				added_reps++;
-				if (r.end >= STEP_LEN) {
-					shift_pos = r.end - STEP_LEN;
-					// Find the repeat that crosses the next bin to connect them
-					if (i + 1 < n_threads and reps_bin[i + 1].size() > 0) {
-						bool ok = (reps_bin[i+1][0].beg <= shift_pos and reps_bin[i+1][0].end >= shift_pos);
-						if (not ok) continue;
-					}
-					break;
-				}
-			}
-		}
 
 		// Find the repeat crossing the boundary
 		int old_offset = offset;
@@ -684,24 +738,16 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		self_alignment2(opt, len, s, bt_bin[i]);
 		reps_bin[i] = trace_repeats(len, s, bt_bin[i]);
 	}
-	int shift_pos = 0;
 	int added_reps = 0;
 	for (int i = 0; i < n_threads; i++) {
 		int os = offset + i * STEP_LEN;
 		int len = min(PART_LEN, n - os);
-		if (shift_pos) {
-			reps_bin[i] = shift_repeats(len, reps_bin[i], bt_bin[i], shift_pos);
-		}
 		for (const RepInterval &r: reps_bin[i]) {
 			RepInterval x = r;
 			x.beg += offset + i * STEP_LEN;
 			x.end += offset + i * STEP_LEN;
 			all_reps.push_back(x);
 			added_reps++;
-			if (i != n_threads - 1 and r.end >= STEP_LEN) {
-				shift_pos = r.end - STEP_LEN;
-				break;
-			}
 		}
 	}
 	fprintf(stderr, "Batch %d, offset: %d, length: %d, threads: %d, added_reps: %d, real_time: %.2f, CPU_time: %.2f\n",
