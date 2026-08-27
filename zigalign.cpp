@@ -681,6 +681,137 @@ vector<RepInterval> shift_repeats(int n, const vector<RepInterval> &reps, vector
 	return ret;
 }
 
+struct SgResult {
+	int beg, end;
+	int score, mis, gap;
+	SgResult() {
+		beg = end = -1;
+		score = -INF;
+		mis = gap = 0;
+	}
+};
+
+// Banding is not applicable
+SgResult semi_global(const int n, const char *a, const int m, const char *b)
+{
+	// Classical SI score matrix
+	const int MAT_S = 1;
+	const int MIS_P = -4;
+	const int GAP_O = -6;
+	const int GAP_E = -1;
+	const int VERTICAL = 1;
+	const int HORIZONTAL = 2;
+	const int DIAGONAL = 3;
+
+	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
+	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
+	for (int i = 0; i <= m; i++) {
+		prev_H[i] = prev_E[i] = 0;
+	}
+	vector<vector<uint8_t>> bt(n + 1);
+	for (int i = 0; i <= n; i++) {
+		bt[i].resize(m + 1, 0);
+	}
+
+	for (int i = 1; i <= n; i++) {
+		curr_H[0] = curr_E[0] = GAP_O + i * GAP_E;
+		int F = -INF;
+		for (int j = 1; j <= m; j++) {
+			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
+			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
+			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
+			if (F > M) {
+				curr_H[j] = F;
+				bt[i][j] = HORIZONTAL;
+			} else {
+				curr_H[j] = M;
+				bt[i][j] = DIAGONAL;
+			}
+			if (curr_E[j] > curr_H[j]) {
+				curr_H[j] = curr_E[j];
+				bt[i][j] = VERTICAL;
+			}
+		}
+		swap(prev_H, curr_H);
+		swap(prev_E, curr_E);
+	}
+
+	SgResult ret;
+	for (int j = 1; j <= m; j++) {
+		if (prev_H[j] > ret.score) {
+			ret.score = prev_H[j];
+			ret.end = j; // 0-based open
+		}
+	}
+
+	int pi = n, pj = ret.end;
+	while (bt[pi][pj] != 0) {
+		switch (bt[pi][pj]) {
+		case DIAGONAL:
+			pi--;
+			pj--;
+			ret.mis += (a[pi] != b[pj]);
+			break;
+		case VERTICAL:
+			pi--;
+			ret.gap++;
+			break;
+		case HORIZONTAL:
+			pj--;
+			ret.gap++;
+			break;
+		default:
+			break;
+		}
+	}
+	ret.gap += pi;
+	ret.beg = pj;
+	return ret;
+}
+
+vector<RepInterval> extend_pattern(const int p_len, const char *p_seq, const int t_len, const char *t_seq)
+{
+	// Find the start position
+	int len = min(t_len, p_len * 2);
+	SgResult sg = semi_global(p_len, p_seq, len, t_seq);
+	// fprintf(stderr, "[%d,%d) mis=%d, gap=%d, score=%d\n", sg.beg, sg.end, sg.mis, sg.gap, sg.score);
+
+	int pos = sg.beg;
+
+	vector<RepInterval> ret;
+	return ret;
+}
+
+RepInterval pick_pattern(const vector<RepInterval> &reps) {
+	RepInterval ret;
+	vector<int> len_array;
+	for (const RepInterval &r: reps) {
+		len_array.push_back(r.end - r.beg);
+	}
+	sort(len_array.begin(), len_array.end());
+
+	// Find the median (most frequent) length
+	int median_len = len_array[len_array.size() >> 1U];
+	int n = 0;
+	for (const RepInterval &r : reps) {
+		if (r.end - r.beg == median_len) {
+			n++;
+		}
+	}
+	int m = 0;
+	for (const RepInterval &r : reps) {
+		int unit_len = r.end - r.beg;
+		if (unit_len == median_len) {
+			m++;
+			if (m == (n >> 1)) {
+				ret = r;
+				break;
+			}
+		}
+	}
+	return ret;
+}
+
 vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const char *seq)
 {
 	assert(opt.n_threads > 0);
@@ -689,21 +820,32 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 	vector<vector<Bt1Cell>> bt_bin[n_threads];
 	vector<RepInterval> reps_bin[n_threads];
 	vector<RepInterval> all_reps;
+	vector<vector<Bt1Cell>> bt_mat;
+	string ru;
 
+	// TODO: use thread pipeline to achieve higher parallelization
 	int batch_id = 0;
 	while (offset < n) {
 		double r_start = realtime(), c_start = cputime();
 		int guard = offset + n_threads * PART_LEN;
 		if (guard >= n) break;
-		// Multi-threading DP
-		#pragma omp parallel for
-		for (int i = 0; i < n_threads; i++) {
-			const char *s = seq + offset + i * PART_LEN;
-			self_alignment2(opt, PART_LEN, s, bt_bin[i]);
-			reps_bin[i] = trace_repeats(PART_LEN, s, bt_bin[i]);
-		}
+		const char *s0 = seq + offset;
+		// Discover repeat patterns
+		self_alignment2(opt, PART_LEN, s0, bt_mat);
+		vector<RepInterval> tmp_reps = trace_repeats(PART_LEN, s0, bt_mat);
+		RepInterval pattern = pick_pattern(tmp_reps);
+		const char *pat_seq = s0 + pattern.beg;
+		const int pat_len = pattern.end - pattern.beg;
 
-		// TODO: use thread pipeline
+		// Multi-threading DP
+		// #pragma omp parallel for
+		for (int i = 0; i < n_threads; i++) {
+			const char *s = s0 + i * PART_LEN;
+			reps_bin[i] = extend_pattern(pat_len, pat_seq, PART_LEN, s);
+			fprintf(stderr, "\n");
+		}
+		exit(1);
+
 		// Single-thread Stitching
 		int added_reps = 0;
 
