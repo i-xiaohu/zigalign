@@ -276,215 +276,160 @@ struct RepInterval {
 	}
 };
 
-struct WdpCell {
-	int E, F, H;
-	int pi, pj;
+struct PatSeg {
+	int beg, end;
+	int mis, gap;
 
-	WdpCell() {
-		E = F = H = -INF;
-		pi = pj = -1;
+	PatSeg() {
+		beg = end = -1;
+		mis = gap = 0;
 	}
 };
 
-void wraparound_dp(const char *ref_seq, int ref_len, const char *que_seq, int que_len)
-{
-	cout << ref_len << endl;
-	cout << que_len << endl;
+struct WdpCell {
+	int E, F, H;
 
+	WdpCell() {
+		E = F = H = -INF;
+	}
+};
+
+vector<PatSeg> wraparound_dp(const int pat_len, const char *pat_seq, const int que_len, const char *que_seq)
+{
 	// Classical SI score matrix
 	const int MAT_S = 1;
 	const int MIS_P = -4;
 	const int GAP_O = -6;
 	const int GAP_E = -1;
 
-	vector<vector<WdpCell>> dp(que_len + 1);
+	const int VERTICAL = 1;
+	const int HORIZONTAL = 2;
+	const int DIAGONAL = 3;
+	const int WRAP_1 = 4;
+	const int WRAP_2 = 5;
+
+	vector<WdpCell> prev_dp(que_len + 1);
+	vector<WdpCell> curr_dp(que_len + 1);
+	vector<vector<uint8_t>> bt(que_len + 1);
 	for (int i = 0; i <= que_len; i++) {
-		dp[i].resize(ref_len + 1);
+		bt[i].resize(pat_len + 1, 0);
 	}
-	dp[0][0].H = 0;
-	for (int j = 1; j <= ref_len; j++) {
-		dp[0][j].H = dp[0][j].E = GAP_O + j * GAP_E;
+
+	prev_dp[0].H = 0;
+	for (int j = 1; j <= pat_len; j++) {
+		prev_dp[j].H = prev_dp[j].E = GAP_O + j * GAP_E;
+		bt[0][j] = HORIZONTAL;
 	}
 	for (int i = 1; i <= que_len; i++) {
 		// First pass
-		dp[i][0].H = GAP_O + i * GAP_E;
-		dp[i][1].F = max(dp[i-1][ref_len].H + GAP_O, dp[i-1][ref_len].F) + GAP_E; // Wrap
-		dp[i][1].E = max(dp[i-1][1].H + GAP_O, dp[i-1][1].E) + GAP_E;
-		int tmp = que_seq[i-1] == ref_seq[0] ?MAT_S :MIS_P;
-		int d1 = dp[i-1][0].H + tmp; // Leading deletions
-		int d2 = dp[i-1][ref_len].H + tmp; // Wrap
-		if (dp[i][1].F > dp[i][1].H) {
-			dp[i][1].H = dp[i][1].F;
-			dp[i][1].pi = i-1;
-			dp[i][1].pj = ref_len;
+		curr_dp[0].H = GAP_O + i * GAP_E;
+		bt[i][0] = VERTICAL;
+		curr_dp[1].F = max(prev_dp[pat_len].H + GAP_O, prev_dp[pat_len].F) + GAP_E; // Wrap
+		curr_dp[1].E = max(prev_dp[1].H + GAP_O, prev_dp[1].E) + GAP_E;
+		int tmp = que_seq[i-1] == pat_seq[0] ?MAT_S :MIS_P;
+		int d1 = prev_dp[0].H + tmp; // Leading deletions
+		int d2 = prev_dp[pat_len].H + tmp; // Wrap
+		curr_dp[1].H = -INF;
+		if (curr_dp[1].F > curr_dp[1].H) {
+			curr_dp[1].H = curr_dp[1].F;
+			bt[i][1] = WRAP_1;
 		}
-		if (dp[i][1].E > dp[i][1].H) {
-			dp[i][1].H = dp[i][1].E;
-			dp[i][1].pi = i-1;
-			dp[i][1].pj = 1;
+		if (curr_dp[1].E > curr_dp[1].H) {
+			curr_dp[1].H = curr_dp[1].E;
+			bt[i][1] = VERTICAL;
 		}
-		if (d1 > dp[i][1].H) {
-			dp[i][1].H = d1;
-			dp[i][1].pi = i-1;
-			dp[i][1].pj = 0;
+		if (d1 > curr_dp[1].H) {
+			curr_dp[1].H = d1;
+			bt[i][1] = DIAGONAL;
 		}
-		if (d2 > dp[i][1].H) {
-			dp[i][1].H = d2;
-			dp[i][1].pi = i-1;
-			dp[i][1].pj = ref_len;
+		if (d2 > curr_dp[1].H) {
+			curr_dp[1].H = d2;
+			bt[i][1] = WRAP_1;
 		}
-		for (int j = 2; j <= ref_len; j++) {
-			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
-			dp[i][j].E = max(dp[i-1][j].H + GAP_O, dp[i-1][j].E) + GAP_E;
-			int d = dp[i-1][j-1].H + (que_seq[i-1] == ref_seq[j-1] ?MAT_S : MIS_P);
-			if (dp[i][j].F > dp[i][j].H) {
-				dp[i][j].H = dp[i][j].F;
-				dp[i][j].pi = i;
-				dp[i][j].pj = j-1;
+		for (int j = 2; j <= pat_len; j++) {
+			curr_dp[j].F = max(curr_dp[j-1].H + GAP_O, curr_dp[j-1].F) + GAP_E;
+			curr_dp[j].E = max(prev_dp[j].H + GAP_O, prev_dp[j].E) + GAP_E;
+			int d = prev_dp[j-1].H + (que_seq[i-1] == pat_seq[j-1] ?MAT_S : MIS_P);
+			curr_dp[j].H = -INF;
+			if (curr_dp[j].F > curr_dp[j].H) {
+				curr_dp[j].H = curr_dp[j].F;
+				bt[i][j] = HORIZONTAL;
 			}
-			if (dp[i][j].E > dp[i][j].H) {
-				dp[i][j].H = dp[i][j].E;
-				dp[i][j].pi = i-1;
-				dp[i][j].pj = j;
+			if (curr_dp[j].E > curr_dp[j].H) {
+				curr_dp[j].H = curr_dp[j].E;
+				bt[i][j] = VERTICAL;
 			}
-			if (d > dp[i][j].H) {
-				dp[i][j].H = d;
-				dp[i][j].pi = i-1;
-				dp[i][j].pj = j-1;
+			if (d > curr_dp[j].H) {
+				curr_dp[j].H = d;
+				bt[i][j] = DIAGONAL;
 			}
 		}
 		// Second pass
-		tmp = dp[i][ref_len].H + GAP_O + GAP_E;
-		if (tmp > dp[i][1].F) {
-			dp[i][1].F = tmp;
+		tmp = curr_dp[pat_len].H + GAP_O + GAP_E;
+		if (tmp > curr_dp[1].F) {
+			curr_dp[1].F = tmp;
 		}
-		if (dp[i][1].F > dp[i][1].H) {
-			dp[i][1].H = dp[i][1].F;
-			dp[i][1].pi = i;
-			dp[i][1].pj = ref_len;
+		if (curr_dp[1].F > curr_dp[1].H) {
+			curr_dp[1].H = curr_dp[1].F;
+			bt[i][1] = WRAP_2;
 		}
-		for (int j = 2; j <= ref_len; j++) {
-			tmp = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
-			dp[i][j].F = max(tmp, dp[i][j].F);
-			if (dp[i][j].F > dp[i][j].H) {
-				dp[i][j].H = dp[i][j].F;
-				dp[i][j].pi = i;
-				dp[i][j].pj = j-1;
+		for (int j = 2; j <= pat_len; j++) {
+			tmp = max(curr_dp[j-1].H + GAP_O, curr_dp[j-1].F) + GAP_E;
+			curr_dp[j].F = max(tmp, curr_dp[j].F);
+			if (curr_dp[j].F > curr_dp[j].H) {
+				curr_dp[j].H = curr_dp[j].F;
+				bt[i][j] = HORIZONTAL;
 			}
 		}
+		swap(prev_dp, curr_dp);
 	}
-	int ti = que_len, tj = ref_len;
-	string a, b;
-	while (ti > 0 and tj > 0) {
-		int pi = dp[ti][tj].pi, pj = dp[ti][tj].pj;
-		if (pi == ti and pj == tj - 1) {
-			a += '-';
-			b += ref_seq[tj - 1];
-		} else if (pi == ti - 1 and pj == tj) {
-			a += que_seq[ti - 1];
-			b += '-';
-		} else if (pi == ti - 1 and pj == tj - 1) {
-			a += que_seq[ti - 1];
-			b += ref_seq[tj - 1];
-		} else if (pi == ti - 1 and pj == ref_len) {
-			assert(tj == 1);
-			a += que_seq[ti - 1];
-			b += ref_seq[tj - 1];
-			a += '|';
-			b += '|';
-	 	} else {
-	 		assert(tj == 1);
-	 		fprintf(stderr, "on\n");
-	 		a += '-';
-	 		b += ref_seq[tj - 1];
-	 		a += '|';
-	 		b += '|';
-	 	}
-		ti = pi;
-		tj = pj;
-	}
-	while (ti > 0) {
-		a += que_seq[--ti];
-		b += '-';
-	}
-	while (tj > 0) {
-		a += '-';
-		b += ref_seq[--tj];
-	}
-	reverse(a.begin(), a.end());
-	reverse(b.begin(), b.end());
-	// sanity check
-	{
-		assert(a.size() == b.size());
-		string xa;
-		for (char c: a) {
-			if (c != '|' and c != '-') {
-				xa += c;
-			}
-		}
-		string ya;
-		for (int i = 0; i < que_len; i++) {
-			ya += que_seq[i];
-		}
-		assert(xa == ya);
-
-		string xb;
-		for (char c: b) {
-			if (c != '|' and c != '-') {
-				xb += c;
-			}
-		}
-		string yb;
-		for (int i = 0; i < ref_len; i++) {
-			yb += ref_seq[i];
-		}
-		assert(xb.size() % yb.size() == 0);
-		int t = xb.size() / yb.size();
-		for (int i = 0; i < t; i++) {
-			for (int j = 0; j < ref_len; j++) {
-				assert(xb[i * ref_len + j] == yb[j]);
-			}
-		}
-	}
-	// Output
-	vector<string> xa, xb;
-	for (int i = 0; i < a.size(); ) {
-		int end = a.size();
-		for (int j = i; j < a.size(); j++) {
-			if (a[j] == '|') {
-				end = j;
+	vector<PatSeg> segments;
+	PatSeg tmp;
+	tmp.end = que_len;
+	int ti = que_len, tj = pat_len;
+	while (ti > 0 or tj > 0) {
+		switch (bt[ti][tj]) {
+			case HORIZONTAL:
+				tmp.gap++;
+				tj--;
 				break;
-			}
-		}
-		string t = a.substr(i, end - i);
-		xa.push_back(t);
-		i = end + 1;
-	}
-	for (int i = 0; i < b.size(); ) {
-		int end = b.size();
-		for (int j = i; j < b.size(); j++) {
-			if (b[j] == '|') {
-				end = j;
+			case VERTICAL:
+				tmp.gap++;
+				ti--;
 				break;
-			}
+			case DIAGONAL:
+				tmp.mis += (que_seq[ti-1] != pat_seq[tj-1]);
+				ti--;
+				tj--;
+				break;
+			case WRAP_1:
+				assert(tj == 1);
+				tmp.mis += (que_seq[ti-1] != pat_seq[tj-1]);
+				tmp.beg = ti - 1;
+				ti--;
+				tj = pat_len;
+				segments.push_back(tmp);
+				tmp = PatSeg();
+				tmp.end = ti + 1;
+				break;
+			case WRAP_2:
+				assert(tj == 1);
+				tmp.gap++;
+				tmp.beg = ti - 1;
+				tj = pat_len;
+				segments.push_back(tmp);
+				tmp = PatSeg();
+				tmp.end = ti;
+				break;
+			default:
+				break;
 		}
-		string t = b.substr(i, end - i);
-		xb.push_back(t);
-		i = end + 1;
 	}
-	for (int i = 0; i < xa.size(); i++) {
-		const string &ta = xa[i];
-		const string &tb = xb[i];
-		cout << ta << endl;
-		cout << tb << endl;
-		cout << endl;
-	}
+	tmp.beg = ti;
+	segments.push_back(tmp);
+	reverse(segments.begin(), segments.end());
+	return segments;
 }
-
-struct NormalizedReps {
-	int nor_len;
-	//
-};
 
 vector<RepInterval> trace_repeats(uint16_t n, const char *seq, const vector<vector<Bt1Cell>> &bt)
 {
@@ -548,49 +493,6 @@ vector<RepInterval> trace_repeats(uint16_t n, const char *seq, const vector<vect
 		i = j;
 	}
 	reps.resize(new_size);
-
-	// TODO: post-process it using wraparound DP
-	vector<int> len_array;
-	for (const RepInterval &r: reps) {
-		len_array.push_back(r.end - r.beg);
-	}
-	sort(len_array.begin(), len_array.end());
-
-	// Find the median (most frequent) length
-	const double MAX_VAR_RATE = 0.3;
-	int median_len = len_array[len_array.size() >> 1U];
-	cout << median_len << endl;
-	const char *ref_seq = nullptr;
-	int ref_len = -1;
-	for (const RepInterval &r : reps) {
-		int unit_len = r.end - r.beg;
-		if (unit_len == median_len) {
-			ref_seq = seq + r.beg;
-			ref_len = r.end - r.beg;
-			break;
-		}
-	}
-	if (ref_seq == nullptr) return reps;
-	// It is better to use consensus sequence, but it is more complicated and time-consuming
-	bool check = false;
-	for (const RepInterval &r: reps) {
-		if (check) {
-			cout << "the unit after wdp" << endl;
-			for (int i = r.beg; i < r.end; i++) {
-				cout << seq[i];
-			}
-			cout << endl;
-			cout << endl;
-			check = false;
-		}
-		int unit_len = r.end - r.beg;
-		if (1.0 * unit_len / ref_len > 2.0 - MAX_VAR_RATE) {
-			const char *unit_seq = seq + r.beg;
-			wraparound_dp(ref_seq, ref_len, unit_seq, unit_len);
-			check = true;
-		}
-	}
-
 	return reps;
 }
 
@@ -774,9 +676,19 @@ vector<RepInterval> extend_pattern(const int p_len, const char *p_seq, const int
 	// Find the start position
 	int len = min(t_len, p_len * 2);
 	SgResult sg = semi_global(p_len, p_seq, len, t_seq);
-	// fprintf(stderr, "[%d,%d) mis=%d, gap=%d, score=%d\n", sg.beg, sg.end, sg.mis, sg.gap, sg.score);
+	fprintf(stderr, "[%d,%d) mis=%d, gap=%d, score=%d\n", sg.beg, sg.end, sg.mis, sg.gap, sg.score);
 
 	int pos = sg.beg;
+	vector<PatSeg> segs = wraparound_dp(p_len,p_seq,t_len - pos, t_seq + pos);
+	for (int i = 0; i < segs.size(); i++) {
+		const PatSeg &s = segs[i];
+		fprintf(stdout, "i=%d, [%d,%d) len=%d, mis=%d, gap=%d\n", i, s.beg, s.end, s.end - s.beg, s.mis, s.gap);
+		for (int j = s.beg; j < s.end; j++) {
+			fprintf(stdout, "%c", t_seq[j]);
+		}
+		fprintf(stdout, "\n");
+	}
+	fprintf(stdout, "------------------------------\n");
 
 	vector<RepInterval> ret;
 	return ret;
@@ -842,7 +754,6 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		for (int i = 0; i < n_threads; i++) {
 			const char *s = s0 + i * PART_LEN;
 			reps_bin[i] = extend_pattern(pat_len, pat_seq, PART_LEN, s);
-			fprintf(stderr, "\n");
 		}
 		exit(1);
 
