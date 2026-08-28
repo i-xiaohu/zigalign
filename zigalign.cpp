@@ -11,6 +11,7 @@
 #include <iostream>
 #include <getopt.h>
 #include <algorithm>
+#include <atomic>
 #include <numeric>
 #include <ratio>
 #include <omp.h>
@@ -27,6 +28,7 @@ const int NEW_COPY = 2;
 const int WITHIN_REP = 3;
 const int END_REP = 4;
 const int MAX_UNIT_DIS = 100000;
+const double MIN_MATCH_RATIO = 0.6;
 
 const bool DEBUG = false;
 
@@ -264,25 +266,15 @@ struct Bt1Cell {
 
 struct RepInterval {
 	int beg, end; // [beg, end)
-	int mis, gap; // #mismatches and #gaps
+	int mat, mis, gap; // #matches, mismatches and gaps
 
 	RepInterval() {
 		beg = end = -1;
-		mis = gap = 0;
+		mat = mis = gap = 0;
 	}
 
 	bool operator < (const RepInterval &b) const {
 		return (this->beg != b.beg) ? this->beg < b.beg : this->end < b.end;
-	}
-};
-
-struct PatSeg {
-	int beg, end;
-	int mis, gap;
-
-	PatSeg() {
-		beg = end = -1;
-		mis = gap = 0;
 	}
 };
 
@@ -294,7 +286,7 @@ struct WdpCell {
 	}
 };
 
-vector<PatSeg> wraparound_dp(const int pat_len, const char *pat_seq, const int que_len, const char *que_seq)
+vector<RepInterval> wraparound_dp(const int pat_len, const char *pat_seq, const int que_len, const char *que_seq)
 {
 	// Classical SI score matrix
 	const int MAT_S = 1;
@@ -308,8 +300,8 @@ vector<PatSeg> wraparound_dp(const int pat_len, const char *pat_seq, const int q
 	const int WRAP_1 = 4;
 	const int WRAP_2 = 5;
 
-	vector<WdpCell> prev_dp(que_len + 1);
-	vector<WdpCell> curr_dp(que_len + 1);
+	vector<WdpCell> prev_dp( pat_len + 1);
+	vector<WdpCell> curr_dp(pat_len + 1);
 	vector<vector<uint8_t>> bt(que_len + 1);
 	for (int i = 0; i <= que_len; i++) {
 		bt[i].resize(pat_len + 1, 0);
@@ -383,8 +375,8 @@ vector<PatSeg> wraparound_dp(const int pat_len, const char *pat_seq, const int q
 		}
 		swap(prev_dp, curr_dp);
 	}
-	vector<PatSeg> segments;
-	PatSeg tmp;
+	vector<RepInterval> segments;
+	RepInterval tmp;
 	tmp.end = que_len;
 	int ti = que_len, tj = pat_len;
 	while (ti > 0 or tj > 0) {
@@ -399,18 +391,20 @@ vector<PatSeg> wraparound_dp(const int pat_len, const char *pat_seq, const int q
 				break;
 			case DIAGONAL:
 				tmp.mis += (que_seq[ti-1] != pat_seq[tj-1]);
+				tmp.mat += (que_seq[ti-1] == pat_seq[tj-1]);
 				ti--;
 				tj--;
 				break;
 			case WRAP_1:
 				assert(tj == 1);
 				tmp.mis += (que_seq[ti-1] != pat_seq[tj-1]);
+				tmp.mat += (que_seq[ti-1] == pat_seq[tj-1]);
 				tmp.beg = ti - 1;
 				ti--;
 				tj = pat_len;
 				segments.push_back(tmp);
-				tmp = PatSeg();
-				tmp.end = ti + 1;
+				tmp = RepInterval();
+				tmp.end = ti;
 				break;
 			case WRAP_2:
 				assert(tj == 1);
@@ -418,8 +412,8 @@ vector<PatSeg> wraparound_dp(const int pat_len, const char *pat_seq, const int q
 				tmp.beg = ti - 1;
 				tj = pat_len;
 				segments.push_back(tmp);
-				tmp = PatSeg();
-				tmp.end = ti;
+				tmp = RepInterval();
+				tmp.end = ti - 1;
 				break;
 			default:
 				break;
@@ -674,23 +668,28 @@ SgResult semi_global(const int n, const char *a, const int m, const char *b)
 vector<RepInterval> extend_pattern(const int p_len, const char *p_seq, const int t_len, const char *t_seq)
 {
 	// Find the start position
-	int len = min(t_len, p_len * 2);
+	int len = min(t_len, (int)(p_len * 1.5));
 	SgResult sg = semi_global(p_len, p_seq, len, t_seq);
-	fprintf(stderr, "[%d,%d) mis=%d, gap=%d, score=%d\n", sg.beg, sg.end, sg.mis, sg.gap, sg.score);
 
 	int pos = sg.beg;
-	vector<PatSeg> segs = wraparound_dp(p_len,p_seq,t_len - pos, t_seq + pos);
-	for (int i = 0; i < segs.size(); i++) {
-		const PatSeg &s = segs[i];
-		fprintf(stdout, "i=%d, [%d,%d) len=%d, mis=%d, gap=%d\n", i, s.beg, s.end, s.end - s.beg, s.mis, s.gap);
-		for (int j = s.beg; j < s.end; j++) {
-			fprintf(stdout, "%c", t_seq[j]);
-		}
-		fprintf(stdout, "\n");
+	vector<RepInterval> ret = wraparound_dp(p_len,p_seq,t_len - pos, t_seq + pos);
+	ret.resize(ret.size() - 1); // Kick off the last one
+	for (RepInterval &r: ret) {
+		// fprintf(stderr, "%d %d %d\n", r.beg, r.end, r.end - r.beg);
+		r.beg += pos;
+		r.end += pos;
 	}
-	fprintf(stdout, "------------------------------\n");
 
-	vector<RepInterval> ret;
+	int cnt = 0;
+	for (int i = 0; i < ret.size(); i++) {
+		const RepInterval &r = ret[i];
+		double match_ratio = 1.0 * r.mat / (r.end - r.beg);
+		if (match_ratio < MIN_MATCH_RATIO) {
+			cnt++;
+		}
+	}
+	if (cnt) fprintf(stderr, "Caution: %d\n", cnt);
+
 	return ret;
 }
 
@@ -728,55 +727,94 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 {
 	assert(opt.n_threads > 0);
 	int n_threads = opt.n_threads;
-	int offset = 0;
+	int global_os = 0;
 	vector<vector<Bt1Cell>> bt_bin[n_threads];
 	vector<RepInterval> reps_bin[n_threads];
 	vector<RepInterval> all_reps;
 	vector<vector<Bt1Cell>> bt_mat;
-	string ru;
+	string rep_pat;
 
-	// TODO: use thread pipeline to achieve higher parallelization
+	// TODO: use thread pipeline to achieve better parallelization
 	int batch_id = 0;
-	while (offset < n) {
+	while (global_os < n) {
 		double r_start = realtime(), c_start = cputime();
-		int guard = offset + n_threads * PART_LEN;
+		int guard = global_os + n_threads * PART_LEN;
 		if (guard >= n) break;
-		const char *s0 = seq + offset;
-		// Discover repeat patterns
-		self_alignment2(opt, PART_LEN, s0, bt_mat);
-		vector<RepInterval> tmp_reps = trace_repeats(PART_LEN, s0, bt_mat);
-		RepInterval pattern = pick_pattern(tmp_reps);
-		const char *pat_seq = s0 + pattern.beg;
-		const int pat_len = pattern.end - pattern.beg;
+		const char *s0 = seq + global_os;
+		const char *pat_seq;
+		int pat_len;
+		if (rep_pat.empty()) {
+			// Discover repeat patterns
+			self_alignment2(opt, PART_LEN, s0, bt_mat);
+			vector<RepInterval> tmp_reps = trace_repeats(PART_LEN, s0, bt_mat);
+			RepInterval pattern = pick_pattern(tmp_reps);
+			pat_seq = s0 + pattern.beg;
+			pat_len = pattern.end - pattern.beg;
+			rep_pat.resize(pat_len);
+			memcpy((char*)rep_pat.data(), pat_seq, pat_len);
+			// cout << rep_pat << endl;
+		} else {
+			pat_seq = rep_pat.data();
+			pat_len = rep_pat.size();
+		}
+
 
 		// Multi-threading DP
 		// #pragma omp parallel for
 		for (int i = 0; i < n_threads; i++) {
-			const char *s = s0 + i * PART_LEN;
+			int os = i * PART_LEN;
+			const char *s = s0 + os;
 			reps_bin[i] = extend_pattern(pat_len, pat_seq, PART_LEN, s);
-		}
-		exit(1);
-
-		// Single-thread Stitching
-		int added_reps = 0;
-
-		// Find the repeat crossing the boundary
-		int old_offset = offset;
-		bool found = false;
-		for (const RepInterval &r: reps_bin[n_threads - 1]) {
-			if (r.end >= STEP_LEN) {
-				found = true;
-				offset += (n_threads - 1) * STEP_LEN + r.end;
-				break;
+			for (RepInterval &r: reps_bin[i]) {
+				r.beg += os;
+				r.end += os;
 			}
 		}
-		if (not found) offset = guard;
+
+		// Single-thread Stitching
+		int old_n = all_reps.size();
+		for (int i = 0; i < n_threads; i++) {
+			for (RepInterval &r: reps_bin[i]) {
+				r.beg += global_os;
+				r.end += global_os;
+				all_reps.push_back(r);
+			}
+			if (i > 0) {
+				// Fill the gap in between
+				int beg = reps_bin[i-1].back().end;
+				int end = reps_bin[i].front().beg;
+				vector<RepInterval> mid = wraparound_dp(pat_len, pat_seq, end - beg, s0 + beg);
+				for (RepInterval&r : mid) {
+					r.beg += global_os + beg;
+					r.end += global_os + beg;
+					all_reps.push_back(r);
+				}
+			}
+		}
+
+		int added_reps = all_reps.size() - old_n;
 		fprintf(stderr, "Batch %d, offset: %d, added_reps: %d, real_time: %.2f, CPU_time: %.2f\n",
-			++batch_id, old_offset, added_reps, realtime() - r_start, cputime() - c_start);
+			++batch_id, global_os, added_reps, realtime() - r_start, cputime() - c_start);
+
+		// Find the end position of the repeat pattern
+		global_os = all_reps.back().end;
+		int cnt = 0;
+		for (int i = old_n; i < all_reps.size(); i++) {
+			const RepInterval &r = all_reps[i];
+			fprintf(stdout, "[%d, %d) mat=%d, mis=%d, gap=%d\n", r.beg, r.end, r.mat, r.mis, r.gap);
+			// FIXME: this is inaccurate
+			double match_ratio = 1.0 * r.mat / (r.end - r.beg);
+			if (match_ratio < MIN_MATCH_RATIO) {
+				fprintf(stderr, "%d\n", i);
+				cnt++;
+			}
+		}
+		fprintf(stderr, "cnt = %d\n", cnt);
 	}
+	exit(1);
 
 	// Process the last batch
-	int m = n - offset;
+	int m = n - global_os;
 	if (m <= PART_LEN) {
 		n_threads = 1;
 	} else {
@@ -785,7 +823,7 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 	double r_start = realtime(), c_start = cputime();
 	#pragma omp parallel for num_threads(n_threads)
 	for (int i = 0; i < n_threads; i++) {
-		int os = offset + i * STEP_LEN;
+		int os = global_os + i * STEP_LEN;
 		const char *s = seq + os;
 		int len = min(PART_LEN, n - os);
 		self_alignment2(opt, len, s, bt_bin[i]);
@@ -793,18 +831,18 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 	}
 	int added_reps = 0;
 	for (int i = 0; i < n_threads; i++) {
-		int os = offset + i * STEP_LEN;
+		int os = global_os + i * STEP_LEN;
 		int len = min(PART_LEN, n - os);
 		for (const RepInterval &r: reps_bin[i]) {
 			RepInterval x = r;
-			x.beg += offset + i * STEP_LEN;
-			x.end += offset + i * STEP_LEN;
+			x.beg += global_os + i * STEP_LEN;
+			x.end += global_os + i * STEP_LEN;
 			all_reps.push_back(x);
 			added_reps++;
 		}
 	}
 	fprintf(stderr, "Batch %d, offset: %d, length: %d, threads: %d, added_reps: %d, real_time: %.2f, CPU_time: %.2f\n",
-		++batch_id, offset, m, n_threads, added_reps, realtime() - r_start, cputime() - c_start);
+		++batch_id, global_os, m, n_threads, added_reps, realtime() - r_start, cputime() - c_start);
 
 	// Reset 0-based coordinates
 	for (RepInterval &r: all_reps) {
