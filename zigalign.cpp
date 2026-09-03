@@ -22,7 +22,6 @@ using namespace std;
 const int INF = 100000000;
 const uint16_t SA_MAX_LEN = 50000; // Self-alignment max length
 const int PART_LEN = 40000;
-const int STEP_LEN = 20000;
 const int NORMAL = 0;
 const int START_REP = 1;
 const int NEW_COPY = 2;
@@ -102,7 +101,7 @@ struct Bt1Cell {
 	}
 };
 
- void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<vector<Bt1Cell>> &bt)
+void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<vector<Bt1Cell>> &bt)
 {
 	if (n > SA_MAX_LEN) {
 		fprintf(stderr, "Sequence length %d exceeds the limit of self alignment %d\n", n, SA_MAX_LEN);
@@ -725,17 +724,22 @@ RepInterval pick_pattern(const vector<RepInterval> &reps) {
 	return ret;
 }
 
-vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const char *seq)
+struct LongRepeats {
+	string pattern;
+	vector<RepInterval> repeats;
+};
+
+vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const char *seq)
 {
 	assert(opt.n_threads > 0);
 	int n_threads = opt.n_threads;
 	int global_os = 0;
 	vector<vector<Bt1Cell>> bt_bin[n_threads];
 	vector<RepInterval> reps_bin[n_threads];
-	vector<RepInterval> all_reps;
 	vector<vector<Bt1Cell>> bt_mat;
 	string rep_pat;
-	vector<string> all_patterns;
+	vector<RepInterval> all_reps;
+	vector<LongRepeats> ret;
 
 	// TODO: use thread pipeline to achieve better parallelization
 	int batch_id = 0;
@@ -760,8 +764,6 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 			pat_len = pattern.end - pattern.beg;
 			rep_pat.resize(pat_len);
 			memcpy((char*)rep_pat.data(), pat_seq, pat_len);
-			all_patterns.push_back(rep_pat);
-			// cout << rep_pat << endl;
 		} else {
 			pat_seq = rep_pat.data();
 			pat_len = rep_pat.size();
@@ -819,12 +821,13 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		for (int i = old_n; i < all_reps.size(); i++) {
 			const RepInterval &r = all_reps[i];
 			// fprintf(stderr, "%d [%d, %d) mat=%d, mis=%d, gap=%d\n", i, r.beg, r.end, r.mat, r.mis, r.gap);
-			double match_ratio = 1.0 -  (double)(r.mis + r.gap) / (r.end - r.beg);
+			double match_ratio = 1.0 -  (double)(r.mis + r.gap) / pat_len;
 			if (match_ratio < MIN_MATCH_RATIO) {
+				// fprintf(stderr, "%d [%d, %d) mat=%d, mis=%d, gap=%d\n", i, r.beg, r.end, r.mat, r.mis, r.gap);
 				streak_len += (r.end - r.beg);
 				cnt++;
 				// New type of repeats
-				if (cnt > MAX_DIV_CNT and MAX_DIV_LEN > 2000) {
+				if (cnt > MAX_DIV_CNT and streak_len > MAX_DIV_LEN) {
 					truncate = i - MAX_DIV_CNT;
 					break;
 				}
@@ -834,27 +837,103 @@ vector<RepInterval> collect_long_repeats(const ZigOptions &opt, int n, const cha
 			}
 		}
 
-
 		// How to process those short poorly aligned units?
 
 		if (truncate != -1) {
 			fprintf(stderr, "New type of repeats\n");
 			all_reps.resize(truncate);
+			LongRepeats lr;
+			lr.pattern = rep_pat;
+			lr.repeats = all_reps;
+			ret.push_back(lr);
 			global_os = all_reps.back().end;
 			rep_pat.clear();
+			all_reps.clear();
 		}
 	}
-	// Reset 0-based coordinates
-	for (RepInterval &r: all_reps) {
-		r.beg--;
-		r.end--;
+	LongRepeats lr;
+	lr.pattern = rep_pat;
+	lr.repeats = all_reps;
+	ret.push_back(lr);
+
+	fprintf(stderr, "Found %ld patterns\n", ret.size());
+	for (int i = 0; i < ret.size(); i++) {
+		const LongRepeats &r = ret[i];
+		const string &s = r.pattern;
+		int beg = r.repeats.front().beg;
+		int end = r.repeats.back().end;
+		fprintf(stderr, "Pattern %d: length=%ld, range=[%d,%d)\n", i+1, s.length(), beg, end);
 	}
-	sort(all_reps.begin(), all_reps.end());
-	fprintf(stderr, "Found %ld types of repeats\n", all_patterns.size());
-	for (const string &s: all_patterns) {
-		fprintf(stderr, "  %s\n", s.data());
+	return ret;
+}
+
+LongRepeats normalize_repeats(const ZigOptions &opt, int pat_len, const char *pat_seq, int n, const char *seq)
+{
+	assert(opt.n_threads > 0);
+	int n_threads = opt.n_threads;
+	int global_os = 0;
+	vector<RepInterval> reps_bin[n_threads];
+	string rep_pat;
+	rep_pat.resize(pat_len);
+	memcpy((char*)rep_pat.data(), pat_seq, pat_len);
+	vector<RepInterval> all_reps;
+
+	int batch_id = 0;
+	while (global_os < n) {
+		double r_start = realtime(), c_start = cputime();
+		int m = n - global_os;
+		const char *s0 = seq + global_os;
+
+		// Multi-threading DP
+		#pragma omp parallel for
+		for (int i = 0; i < n_threads; i++) {
+			reps_bin[i].clear();
+			int os = i * PART_LEN;
+			int t_len = min(m - os, PART_LEN);
+			if (t_len <= 0) continue;
+			const char *s = s0 + os;
+			reps_bin[i] = extend_pattern(pat_len, pat_seq, t_len, s);
+			for (RepInterval &r: reps_bin[i]) {
+				r.beg += os;
+				r.end += os;
+			}
+		}
+
+		// Single-thread Stitching
+		int old_n = all_reps.size();
+		for (int i = 0; i < n_threads; i++) {
+			for (RepInterval &r: reps_bin[i]) {
+				r.beg += global_os;
+				r.end += global_os;
+				all_reps.push_back(r);
+			}
+			if (i > 0) {
+				if (reps_bin[i-1].empty() or reps_bin[i].empty()) continue;
+				// Fill the gap in between
+				int beg = reps_bin[i-1].back().end;
+				int end = reps_bin[i].front().beg;
+				vector<RepInterval> mid = wraparound_dp(pat_len, pat_seq, end - beg, s0 + beg);
+				for (RepInterval&r : mid) {
+					r.beg += beg; // Untidy style
+					r.end += beg;
+					all_reps.push_back(r);
+				}
+			}
+		}
+		sort(all_reps.begin(), all_reps.end());
+
+		int added_reps = all_reps.size() - old_n;
+		if (added_reps == 0) break;
+		fprintf(stderr, "Batch %d, offset: %d, added_reps: %d, real_time: %.2f, CPU_time: %.2f\n",
+			++batch_id, global_os, added_reps, realtime() - r_start, cputime() - c_start);
+
+		// Find the end position of the repeat pattern
+		global_os = all_reps.back().end;
 	}
-	return all_reps;
+	LongRepeats ret;
+	ret.pattern = rep_pat;
+	ret.repeats = all_reps;
+	return ret;
 }
 
 // ------------------------ //
@@ -2153,63 +2232,147 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	int t_len = seq1.length(), q_len = seq2.length();
 	const char *t_seq = seq1.data(), *q_seq = seq2.data();
 
-	vector<RepInterval> t_reps = collect_long_repeats(opt, t_len, t_seq);
-	vector<RepInterval> q_reps = collect_long_repeats(opt, q_len, q_seq);
+	vector<LongRepeats> lr_t = collect_long_repeats(opt, t_len, t_seq);
+	vector<LongRepeats> lr_q = collect_long_repeats(opt, q_len, q_seq);
+
 	if (opt.log_prefix) {
-		FILE* fo = fopen((string(opt.log_prefix) + "_t_reps.tsv").c_str(), "w");
+		FILE* fo = fopen((string(opt.log_prefix) + "_t_pattern.tsv").c_str(), "w");
 		assert(fo);
-		fprintf(fo, "%s\t%s\t%s\n", "beg", "end", "length");
-		for (const RepInterval &r: t_reps) {
-			fprintf(fo, "%d\t%d\t%d\n", r.beg, r.end, r.end - r.beg);
+		fprintf(fo, "%s\t%s\n", "ID", "Pattern");
+		for (int i = 0; i < lr_t.size(); i++) {
+			fprintf(fo, "%d\t%s\n", i + 1, lr_t[i].pattern.data());
+		}
+		fclose(fo);
+
+		fo = fopen((string(opt.log_prefix) + "_t_reps.tsv").c_str(), "w");
+		assert(fo);
+		fprintf(fo, "%s\t%s\t%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len", "mis", "gap");
+		for (int i = 0; i < lr_t.size(); i++) {
+			for (const RepInterval &r: lr_t[i].repeats) {
+				fprintf(fo, "%d\t%d\t%d\t%d\t%d\t%d\n", i + 1, r.beg, r.end, r.end - r.beg, r.mis, r.gap);
+			}
+		}
+		fclose(fo);
+
+		fo = fopen((string(opt.log_prefix) + "_q_pattern.tsv").c_str(), "w");
+		assert(fo);
+		fprintf(fo, "%s\t%s\n", "ID", "Pattern");
+		for (int i = 0; i < lr_q.size(); i++) {
+			fprintf(fo, "%d\t%s\n", i + 1, lr_q[i].pattern.data());
 		}
 		fclose(fo);
 
 		fo = fopen((string(opt.log_prefix) + "_q_reps.tsv").c_str(), "w");
 		assert(fo);
-		fprintf(fo, "%s\t%s\t%s\n", "beg", "end", "length");
-		for (const RepInterval &r: q_reps) {
-			fprintf(fo, "%d\t%d\t%d\n", r.beg, r.end, r.end - r.beg);
+		fprintf(fo, "%s\t%s\t%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len", "mis", "gap");
+		for (int i = 0; i < lr_q.size(); i++) {
+			for (const RepInterval &r: lr_q[i].repeats) {
+				fprintf(fo, "%d\t%d\t%d\t%d\t%d\t%d\n", i + 1, r.beg, r.end, r.end - r.beg, r.mis, r.gap);
+			}
 		}
 		fclose(fo);
 	}
 	int t_sum = 0, q_sum = 0;
-	for (const RepInterval &r: t_reps) t_sum += r.end - r.beg;
-	for (const RepInterval &r: q_reps) q_sum += r.end - r.beg;
+	for (const LongRepeats &lr: lr_t) {
+		for (const RepInterval &r: lr.repeats) {
+			t_sum += r.end - r.beg;
+		}
+	}
+	for (const LongRepeats &lr: lr_q) {
+		for (const RepInterval &r: lr.repeats) {
+			q_sum += r.end - r.beg;
+		}
+	}
 	fprintf(stderr, "Target repeat fraction[%%]: %.2f\n", 100.0 * t_sum / t_len);
 	fprintf(stderr, "Query repeat fraction[%%]: %.2f\n", 100.0 * q_sum / q_len);
 	exit(1);
 
-	auto si = split_repeats(opt, t_len, t_seq, t_reps, q_len, q_seq, q_reps);
-	vector<SplitInterval> &t_si = si.first;
-	vector<SplitInterval> &q_si = si.second;
-
-	double c_start = cputime(), r_start = realtime();
-	// Scoring matrix between repeat units
-	const int n = t_si.size(), m = q_si.size();
-	vector<vector<int>> matrix(n);
-	for (int i = 0; i < n; i++) matrix[i].resize(m, -INF);
-	#pragma omp parallel for
-	for (int i = 0; i < n; i++) {
-		const SplitInterval &a = t_si[i];
-		int len_a = a.end - a.beg;
-		SplitInterval lb, ub;
-		lb.beg = lb.end = a.beg - MAX_UNIT_DIS;
-		ub.beg = ub.end = a.end + MAX_UNIT_DIS;
-		auto low = lower_bound(q_si.begin(), q_si.end(), lb);
-		auto high = lower_bound(q_si.begin(), q_si.end(), ub);
-		for (auto it = low; it < high; ++it) {
-			const SplitInterval &b = *it;
-			if ((a.is_prefix ^ b.is_prefix) != 1) continue; // Prefix matches suffix
-			int len_b = b.end - b.beg;
-			if (1.0 * abs(len_a - len_b) / min(len_a, len_b) > 0.1) continue;
-			int score = global_alignment(len_a, t_seq + a.beg, len_b, q_seq + b.beg);
-			// fprintf(stdout, "[%d, %d) aln [%d, %d) score=%d\n", a.beg, a.end, b.beg, b.end, score);
-			int j = it - q_si.begin();
-			matrix[i][j] = score;
+	// Compare patterns
+	vector<int> map_t(lr_t.size(), -1);
+	vector<int> map_q(lr_q.size(), -1);
+	for (int i = 0; i < lr_t.size(); i++) {
+		int max_score = -INF;
+		int k = 0;
+		const string &a = lr_t[i].pattern;
+		for (int j = 0; j < lr_q.size(); j++) {
+			const string &c = lr_q[j].pattern;
+			SgResult sg;
+			if (a.length() < c.length()) {
+				const string &b = c + c;
+				sg = semi_global(a.length(), a.data(), b.length(), b.data());
+			} else {
+				const string &b = a + a;
+				sg = semi_global(c.length(), c.data(), b.length(), b.data());
+			}
+			if (sg.score > max_score) {
+				max_score = sg.score;
+				k = j;
+			}
+		}
+		// Select shorter pattern
+		if (a.length() < lr_q[k].pattern.length()) {
+			map_t[i] = k;
+		} else {
+			map_q[k] = i;
 		}
 	}
-	fprintf(stderr, "Compare split intervals in %.2f CPU time, %.2f real time\n", cputime() - c_start, realtime() - r_start);
+	// Mandatory one-to-one match
+	vector<bool> vis_q(lr_q.size(), false);
+	vector<bool> vis_t(lr_t.size(), false);
+	for (int i = 0; i < lr_t.size(); i++) {
+		// Normalize repeats with pattern
+		const string &pattern = lr_t[i].pattern;
+		if (not vis_t[i] and map_t[i] != -1) {
+			int k = map_t[i];
+			if (vis_q[k]) continue;
+			vis_t[i] = true;
+			vis_q[k] = true;
+			LongRepeats &lr = lr_q[k];
+			fprintf(stderr, "T pattern %d normalizes Q repeats %d, size=%ld\n", i, k, lr.repeats.size());
+			int low = lr.repeats.front().beg;
+			int high = lr.repeats.back().end;
+			int len = high - low;
+			const char *s = q_seq + low;
+			lr = normalize_repeats(opt, pattern.length(), pattern.data(), len, s);
+			fprintf(stderr, "Done! Q repeats size: %ld\n", lr.repeats.size());
+			q_sum = 0;
+			for (const RepInterval &r: lr.repeats) {
+				q_sum += r.end - r.beg;
+			}
+			fprintf(stderr, "Q repeat fraction: %.2f\n", 100.0 * q_sum / q_len);
+		}
+	}
+	for (int i = 0; i < lr_q.size(); i++) {
+		// Normalize repeats with pattern
+		const string &pattern = lr_q[i].pattern;
+		if (not vis_q[i] and map_q[i] != -1) {
+			int k = map_q[i];
+			if (vis_t[k]) continue;
+			vis_q[i] = true;
+			vis_t[k] = true;
+			LongRepeats &lr = lr_t[k];
+			fprintf(stderr, "T pattern %d normalizes Q repeats %d, size=%ld\n", k, i, lr.repeats.size());
+			int low = lr.repeats.front().beg;
+			int high = lr.repeats.back().end;
+			int len = high - low;
+			const char *s = t_seq + low;
+			lr = normalize_repeats(opt, pattern.length(), pattern.data(), len, s);
+			fprintf(stderr, "Done! T repeats size: %ld\n", lr.repeats.size());
+			t_sum = 0;
+			for (RepInterval &r: lr.repeats) {
+				r.beg += low;
+				r.end += low;
+				fprintf(stderr, "[%d, %d) len=%d, mis=%d, gap=%d\n", r.beg, r.end, r.end - r.beg, r.mis, r.gap);
+				t_sum += r.end - r.beg;
+			}
+			fprintf(stderr, "T repeat fraction: %.2f\n", 100.0 * t_sum / t_len);
+		}
+	}
+	exit(1);
 
+	int n = 0, m = 0;
+	vector<vector<int>> matrix(n);
+	for (int i = 0; i < n; i++) matrix[i].resize(m, -INF);
 	// TODO: set the penalty of deleting units
 	const int DEL_UNIT = -20;
 	const int VERTICAL = 1;
@@ -2273,52 +2436,52 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	reverse(t_del.begin(), t_del.end());
 	reverse(q_del.begin(), q_del.end());
 
-	// TODO: process partly deleted units
-
-	int aln_len = 0, t_del_len = 0, q_del_len = 0;
-	FILE *fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_aln.tsv").c_str(), "w") :nullptr;
-	if (fo) {
-		fprintf(fo, "%s\t%s\t%s\t%s\t%s\t", "t_id", "t_prefix", "t_beg", "t_end", "t_len");
-		fprintf(fo, "%s\t%s\t%s\t%s\t%s\t", "q_id", "q_prefix", "q_beg", "q_end", "q_len");
-		fprintf(fo, "%s\t%s\t%s\n", "match", "mismatch", "gap");
-	}
-	AlnSta mut; // Small mutations
-	for (const pair<int,int> &p: aln) {
-		int i = p.first, j = p.second;
-		const SplitInterval &t = t_si[i];
-		const SplitInterval &q = q_si[j];
-		aln_len += min(t.end - t.beg, q.end - q.beg);
-		AlnSta res = global_cigar(t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
-		mut += res;
-		if (fo) {
-			fprintf(fo, "%d\t%d\t%d\t%d\t%d\t", i, t.is_prefix, t.beg, t.end, t.end - t.beg);
-			fprintf(fo, "%d\t%d\t%d\t%d\t%d\t", j, q.is_prefix, q.beg, q.end, q.end - q.beg);
-			fprintf(fo, "%d\t%d\t%d\n", res.match, res.mismatch, res.ins + res.del);
-		}
-	}
-	fclose(fo);
-	fprintf(stderr, "Aligned length: %d, matches: %d, mismatches: %d, insertions: %d, deletions: %d\n",
-		aln_len, mut.match, mut.mismatch, mut.ins, mut.del);
-
-	fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_t_del.tsv").c_str(), "w") :nullptr;
-	if (fo) fprintf(fo, "%s\t%s\t%s\t%s\t%s\n", "ID", "prefix", "beg", "end", "len");
-	for (int i: t_del) {
-		const SplitInterval &t = t_si[i];
-		if (fo) fprintf(fo, "%d\t%d\t%d\t%d\t%d\n", i, t.is_prefix, t.beg, t.end, t.end - t.beg);
-		t_del_len += t.end - t.beg;
-	}
-	fclose(fo);
-	fprintf(stderr, "Target deletion length: %d\n", t_del_len);
-
-	fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_q_del.tsv").c_str(), "w") :nullptr;
-	if (fo) fprintf(fo, "%s\t%s\t%s\t%s\t%s\n", "ID", "prefix", "beg", "end", "len");
-	for (int j: q_del) {
-		const SplitInterval &q = q_si[j];
-		if (fo) fprintf(fo, "%d\t%d\t%d\t%d\t%d\n", j, q.is_prefix, q.beg, q.end, q.end - q.beg);
-		q_del_len += q.end - q.beg;
-	}
-	fclose(fo);
-	fprintf(stderr, "Query deletion length: %d\n", q_del_len);
+	// // TODO: process partly deleted units
+	//
+	// int aln_len = 0, t_del_len = 0, q_del_len = 0;
+	// FILE *fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_aln.tsv").c_str(), "w") :nullptr;
+	// if (fo) {
+	// 	fprintf(fo, "%s\t%s\t%s\t%s\t%s\t", "t_id", "t_prefix", "t_beg", "t_end", "t_len");
+	// 	fprintf(fo, "%s\t%s\t%s\t%s\t%s\t", "q_id", "q_prefix", "q_beg", "q_end", "q_len");
+	// 	fprintf(fo, "%s\t%s\t%s\n", "match", "mismatch", "gap");
+	// }
+	// AlnSta mut; // Small mutations
+	// for (const pair<int,int> &p: aln) {
+	// 	int i = p.first, j = p.second;
+	// 	const SplitInterval &t = t_si[i];
+	// 	const SplitInterval &q = q_si[j];
+	// 	aln_len += min(t.end - t.beg, q.end - q.beg);
+	// 	AlnSta res = global_cigar(t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
+	// 	mut += res;
+	// 	if (fo) {
+	// 		fprintf(fo, "%d\t%d\t%d\t%d\t%d\t", i, t.is_prefix, t.beg, t.end, t.end - t.beg);
+	// 		fprintf(fo, "%d\t%d\t%d\t%d\t%d\t", j, q.is_prefix, q.beg, q.end, q.end - q.beg);
+	// 		fprintf(fo, "%d\t%d\t%d\n", res.match, res.mismatch, res.ins + res.del);
+	// 	}
+	// }
+	// fclose(fo);
+	// fprintf(stderr, "Aligned length: %d, matches: %d, mismatches: %d, insertions: %d, deletions: %d\n",
+	// 	aln_len, mut.match, mut.mismatch, mut.ins, mut.del);
+	//
+	// fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_t_del.tsv").c_str(), "w") :nullptr;
+	// if (fo) fprintf(fo, "%s\t%s\t%s\t%s\t%s\n", "ID", "prefix", "beg", "end", "len");
+	// for (int i: t_del) {
+	// 	const SplitInterval &t = t_si[i];
+	// 	if (fo) fprintf(fo, "%d\t%d\t%d\t%d\t%d\n", i, t.is_prefix, t.beg, t.end, t.end - t.beg);
+	// 	t_del_len += t.end - t.beg;
+	// }
+	// fclose(fo);
+	// fprintf(stderr, "Target deletion length: %d\n", t_del_len);
+	//
+	// fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_q_del.tsv").c_str(), "w") :nullptr;
+	// if (fo) fprintf(fo, "%s\t%s\t%s\t%s\t%s\n", "ID", "prefix", "beg", "end", "len");
+	// for (int j: q_del) {
+	// 	const SplitInterval &q = q_si[j];
+	// 	if (fo) fprintf(fo, "%d\t%d\t%d\t%d\t%d\n", j, q.is_prefix, q.beg, q.end, q.end - q.beg);
+	// 	q_del_len += q.end - q.beg;
+	// }
+	// fclose(fo);
+	// fprintf(stderr, "Query deletion length: %d\n", q_del_len);
 }
 
 int usage(const ZigOptions &o) {
