@@ -12,8 +12,6 @@
 #include <getopt.h>
 #include <algorithm>
 #include <omp.h>
-#include <ext/concurrence.h>
-
 #include "utils.h"
 using namespace std;
 
@@ -423,30 +421,20 @@ vector<RepInterval> wraparound_dp(const int pat_len, const char *pat_seq, const 
 	return segments;
 }
 
-
-struct RepeatGroup {
-	int t_beg, t_end; // Template of repeat units
-	vector<RepInterval> units;
-};
-
 vector<RepInterval> backtrack_repeats(uint16_t n, const char *seq, const vector<vector<Bt1Cell>> &bt)
 {
-	vector<RepeatGroup> ret;
 	int ti = n, tj = n;
 	vector<RepInterval> reps;
 	while (ti > 0 and tj > 0) {
 		Bt1Cell t = bt[ti][tj];
 		if (t.event == END_REP) {
 			assert(ti == tj); // Only main diagonal closes repetitions
-			int prev_tb = -1, prev_te = -1;
-			RepeatGroup group;
 			while (t.event != START_REP) {
 				ti = t.pi == 1 ?ti-1 :ti;
 				tj = t.pj;
 				t = bt[ti][tj]; // Lower-right corner of the sub-matrix
 				RepInterval u;
 				u.end = ti + 1;
-				int curr_te = tj + 1;
 				while (t.event != NEW_COPY and t.event != START_REP) {
 					if (t.pi == 1 and tj == t.pj + 1) {
 						u.mis += (seq[ti - 1] != seq[tj - 1]);
@@ -462,74 +450,17 @@ vector<RepInterval> backtrack_repeats(uint16_t n, const char *seq, const vector<
 				u.mis += (seq[ti - 1] != seq[tj - 1]);
 				u.mat += (seq[ti - 1] == seq[tj - 1]);
 				u.beg = ti;
-				int curr_tb = tj;
-
-				prev_tb = curr_tb;
-				prev_te = curr_te;
-
-				group.units.push_back(u);
-				continue;
-
-				const double MIN_OL_RATIO = 0.5;
-				if (prev_tb != -1) {
-					int overlap = min(prev_te, curr_te) - max(prev_tb, curr_tb);
-					double ol_ratio = 1.0 * overlap / max(prev_te - prev_tb, curr_te - curr_tb);
-					if (ol_ratio < MIN_OL_RATIO) {
-						// Set the first unit as template
-						fprintf(stderr, "prev %d %d, curr %d %d\n", prev_tb, prev_te, curr_tb, curr_te);
-						group.t_beg = prev_tb;
-						group.t_end = prev_te;
-						// Add the template unit
-						RepInterval tmp;
-						tmp.beg = prev_tb;
-						tmp.end = prev_te;
-						tmp.gap = tmp.mis = 0;
-						tmp.mat = prev_te - prev_tb;
-						group.units.push_back(tmp);
-						// Sorted
-						reverse(group.units.begin(), group.units.end());
-						ret.push_back(group);
-						// Another group
-						group.units.clear();
-						group.units.push_back(u);
-					} else {
-						// Same group
-						group.units.push_back(u);
-					}
-				} else {
-					group.units.clear();
-				}
-
-				fprintf(stderr, "[%d,%d) copies [%d,%d)\n", u.beg, u.end, curr_tb, curr_te);
-
-				prev_tb = curr_tb;
-				prev_te = curr_te;
+				reps.push_back(u);
 			}
-			assert(prev_tb != -1);
-			group.t_beg = prev_tb;
-			group.t_end = prev_te;
-			RepInterval tmp;
-			tmp.beg = prev_tb;
-			tmp.end = prev_te;
-			tmp.gap = tmp.mis = 0;
-			tmp.mat = prev_te - prev_tb;
-			group.units.push_back(tmp);
-			reverse(group.units.begin(), group.units.end());
-			ret.push_back(group);
+			// Template for all copy units above
+			RepInterval tem;
+			tem.beg = tj;
+			tem.end = ti;
+			tem.mis = tem.gap = -1;
+			reps.push_back(tem);
 		}
 		ti = t.pi == 1 ?ti-1 :ti;
 		tj = t.pj;
-	}
-	reverse(ret.begin(), ret.end());
-
-	fprintf(stdout, "%ld groups\n", ret.size());
-	for (const auto &group: ret) {
-		fprintf(stdout, "Template: [%d,%d)\n", group.t_beg, group.t_end);
-		for (int i = 0; i < group.units.size(); i++) {
-			const RepInterval &u = group.units[i];
-			fprintf(stdout, " Unit %d: [%d,%d) gap=%d,mis=%d,mat=%d\n", i + 1, u.beg, u.end, u.gap, u.mis, u.mat);
-		}
-		fprintf(stdout, "\n");
 	}
 
 	if (reps.empty()) return reps;
@@ -757,32 +688,32 @@ vector<RepInterval> extend_pattern(const int p_len, const char *p_seq, const int
 }
 
 RepInterval pickout_pattern(const vector<RepInterval> &reps) {
-	RepInterval ret;
-	vector<int> len_array;
-	for (const RepInterval &r: reps) {
-		len_array.push_back(r.end - r.beg);
+	const int MIN_LENGTH = 120;
+	int sum = 0;
+	for (const RepInterval &r : reps) {
+		sum += r.end - r.beg;
 	}
-	sort(len_array.begin(), len_array.end());
+	double ave_len = 1.0 * sum / reps.size();
 
-	// Find the median (most frequent) length
-	int median_len = len_array[len_array.size() >> 1U];
-	int n = 0;
-	for (const RepInterval &r : reps) {
-		if (r.end - r.beg == median_len) {
-			n++;
+	int min_len = INF, max_len = -INF;
+	double min_div = INF;
+	int min_id = -1;
+	for (int i = 0; i < reps.size(); i++) {
+		const RepInterval &r = reps[i];
+		int len = r.end - r.beg;
+		// if (len < MIN_LENGTH) continue;
+		double div = abs(len - ave_len);
+		if (div < min_div) {
+			min_div = div;
+			min_id = i;
 		}
+		min_len = min(min_len, len);
+		max_len = max(max_len, len);
 	}
-	int m = 0, k = max(1, n >> 1);
-	for (const RepInterval &r : reps) {
-		int unit_len = r.end - r.beg;
-		if (unit_len == median_len) {
-			m++;
-			if (m == k) {
-				ret = r;
-				break;
-			}
-		}
-	}
+	RepInterval ret = reps[min_id];
+
+	fprintf(stderr, "Picked pattern: [%d,%d), len=%d from %ld repeats (%d,%d)\n",
+		ret.beg, ret.end, ret.end - ret.beg, reps.size(), min_len, max_len);
 	return ret;
 }
 
@@ -795,9 +726,8 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 {
 	assert(opt.n_threads > 0);
 	int global_os = 0;
-	vector<vector<Bt1Cell>> bt_bin[opt.n_threads]; // Backtrace matrices
-	vector<RepInterval> reps_bin[opt.n_threads]; // Repeats
-
+	vector<RepInterval> reps_bin[opt.n_threads];
+	vector<vector<Bt1Cell>> bt_mat;
 	string pattern;
 	vector<RepInterval> all_reps;
 	vector<LongRepeats> ret;
@@ -808,25 +738,51 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		double r_start = realtime(), c_start = cputime();
 		int m = n - global_os;
 		const char *s0 = seq + global_os;
-
-		int n_threads = min((m + PART_LEN - 1) / PART_LEN, opt.n_threads);
-		#pragma omp parallel for num_threads(n_threads)
-		for (int i = 0; i < n_threads; i++) {
-			reps_bin[i].clear();
-			int local_os = i * PART_LEN;
-			int s_len = min(m - local_os, PART_LEN);
-			const char *s_seq = s0 + local_os;
-			self_alignment2(opt, s_len, s_seq, bt_bin[i]);
-			reps_bin[i] = backtrack_repeats(s_len, s_seq, bt_bin[i]);
-			for (RepInterval &r: reps_bin[i]) { // Add local offset
-				r.beg += local_os;
-				r.end += local_os;
+		if (pattern.empty()) {
+			// Discover repeat pattern
+			int k = min(PART_LEN, m);
+			self_alignment2(opt, k, s0, bt_mat);
+			vector<RepInterval> pool = backtrack_repeats(k, s0, bt_mat); // Multiple pattern?
+			vector<RepInterval> reps;
+			// Unwind nested repeats
+			while (not pool.empty()) {
+				vector<RepInterval> next_pool;
+				for (const RepInterval &r: pool) {
+					if (r.end - r.beg < 1000) {
+						reps.push_back(r);
+						continue;
+					}
+					self_alignment2(opt, r.end - r.beg, s0 + r.beg, bt_mat);
+					vector<RepInterval> tmp = backtrack_repeats(r.end - r.beg, s0 + r.beg, bt_mat);
+					if (tmp.empty()) reps.push_back(r);
+					else {
+						for (RepInterval &e: tmp) {
+							e.beg += r.beg;
+							e.end += r.beg;
+							next_pool.push_back(e);
+						}
+					}
+				}
+				pool = next_pool;
 			}
+
+			if (reps.empty()) {
+				// Non-repetitive region (caution for serial execution)
+				global_os += k;
+				continue;
+			}
+			RepInterval p = pickout_pattern(reps);
+			if (p.beg == -1) {
+				global_os += k;
+				continue;
+			}
+			int len = p.end - p.beg;
+			pattern.resize(len);
+			memcpy((char*)pattern.data(), s0 + p.beg, len);
 		}
-		exit(1);
 
 		// Multi-threaded WDP
-
+		int n_threads = min((m + PART_LEN - 1) / PART_LEN, opt.n_threads);
 		#pragma omp parallel for num_threads(n_threads)
 		for (int i = 0; i < n_threads; i++) {
 			reps_bin[i].clear();
@@ -874,7 +830,7 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 				assert(sti_reps[i].beg >= sti_reps[i-1].end);
 			}
 		}
-		// if (sti_reps.empty()) break; // FIXME
+		if (sti_reps.empty()) break; // FIXME
 		assert(sti_reps.size() > 0); // At least the pattern itself will be identified
 
 		// Poorly aligned regions
@@ -900,7 +856,7 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 			poor_range.push_back(make_pair(last_p, sti_reps.size()));
 		}
 		for (const pair<int,int> &pair: poor_range) {
-			fprintf(stderr, "[%d, %d)\n", pair.first, pair.second);
+			// fprintf(stderr, "[%d, %d)\n", pair.first, pair.second);
 		}
 
 		int old_n = all_reps.size();
@@ -916,7 +872,7 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		}
 
 		int added_reps = all_reps.size() - old_n;
-		assert(added_reps > 0);
+		// assert(added_reps > 0);
 		fprintf(stderr, "Batch %d, offset: %d, added_reps: %d, real_time: %.2f, CPU_time: %.2f\n",
 			++batch_id, global_os, added_reps, realtime() - r_start, cputime() - c_start);
 
