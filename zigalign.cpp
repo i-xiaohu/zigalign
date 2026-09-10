@@ -719,6 +719,7 @@ RepInterval pickout_pattern(const vector<RepInterval> &reps) {
 
 struct LongRepeats {
 	int pid; // Pattern ID
+	int base_idx; // Base index
 	string pattern;
 	vector<RepInterval> repeats;
 };
@@ -2154,11 +2155,6 @@ AlnSta global_cigar(const int n, const char *a, const int m, const char *b)
 	return ret;
 }
 
-struct NormalizedRepeats {
-	int pattern_id;
-	vector<RepInterval> reps;
-};
-
 void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 {
 	pair<string, string> pair1 = input_fasta_seq(fn1);
@@ -2292,6 +2288,7 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	vector<int> same_pat[sum_pattern];
 	for (int i = 0; i < sum_pattern; i++) {
 		int k = us_find(parent_set, i);
+		// fprintf(stderr, "parent[%d] = %d\n", i, k);
 		same_pat[k].push_back(i);
 		if (i < lr_t.size()) lr_t[i].pid = k;
 		else lr_q[i - lr_t.size()].pid = k;
@@ -2299,9 +2296,10 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 
 	// Normalize repeats
 	int count = 0;
+	vector<bool> kept(sum_pattern, false);
 	for (const vector<int> &x: same_pat) {
 		if (x.empty()) continue;
-		fprintf(stderr, "cluster %d:\n", ++count);
+		// fprintf(stderr, "cluster %d:\n", ++count);
 		int max_range = 0, max_id = -1;
 		for (int i: x) {
 			int len = 0;
@@ -2309,13 +2307,13 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 				const string &p = lr_t[i].pattern;
 				const vector<RepInterval> &r = lr_t[i].repeats;
 				len = r.back().end - r.front().beg;
-				fprintf(stderr, "i=%d, len=%ld, pattern:%s\n", i, p.length(), p.data());
+				// fprintf(stderr, "i=%d, len=%ld, pattern:%s\n", i, p.length(), p.data());
 			} else {
 				int j = i - lr_t.size();
 				const string &p = lr_q[j].pattern;
 				const vector<RepInterval> &r = lr_q[j].repeats;
 				len = r.back().end - r.front().beg;
-				fprintf(stderr, "j=%d, len=%ld, pattern:%s\n", j, p.length(), p.data());
+				// fprintf(stderr, "j=%d, len=%ld, pattern:%s\n", j, p.length(), p.data());
 			}
 			if (len > max_range) {
 				max_range = len;
@@ -2323,11 +2321,13 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 			}
 		}
 		if (max_id == -1) continue;
+		kept[max_id] = true;
 
 		// Use the pattern with the longest repeat length to normalize other repeats
 		string p;
 		if (max_id < lr_t.size()) p = lr_t[max_id].pattern;
 		else p = lr_q[max_id - lr_t.size()].pattern;
+		int pid = us_find(parent_set, max_id);
 		for (int i: x) {
 			if (i == max_id) continue;
 			LongRepeats lr;
@@ -2337,6 +2337,7 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 				int len = r.back().end - r.front().beg;
 				const char *s = t_seq + os;
 				lr = normalize_repeats(opt, p.length(), p.data(), len, s);
+				lr_t[i].pid = pid;
 				lr_t[i].pattern = p;
 				lr_t[i].repeats = lr.repeats;
 				for (RepInterval &t: lr_t[i].repeats) {
@@ -2350,6 +2351,7 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 				int len = r.back().end - r.front().beg;
 				const char *s = q_seq + os;
 				lr = normalize_repeats(opt, p.length(), p.data(), len, s);
+				lr_q[j].pid = pid;
 				lr_q[j].pattern = p;
 				lr_q[j].repeats = lr.repeats;
 				for (RepInterval &t: lr_q[j].repeats) {
@@ -2357,113 +2359,101 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 					t.end += os;
 				}
 			}
-
-			string fn = "nr_" + to_string(max_id) + "_" + to_string(i) + ".tsv";
-			FILE *f = fopen(fn.data(), "w");
-			assert(f != nullptr);
-			fprintf(stderr, "Use pattern %d to normalize %d\n", max_id, i);
-			fprintf(stderr, "Results are written to %s\n", fn.data());
-			fprintf(f, "%s\t%s\t%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len", "mis", "gap");
-			for (const RepInterval &r: lr.repeats) {
-				fprintf(f, "%d\t%d\t%d\t%d\t%d\t%d\n", count, r.beg, r.end, r.end - r.beg, r.mis, r.gap);
-			}
-			fclose(f);
-			fprintf(stderr, "\n");
 		}
 	}
-	exit(1);
 
-	// Compare patterns
-	vector<int> map_t(lr_t.size(), -1);
-	vector<int> map_q(lr_q.size(), -1);
-	for (int i = 0; i < lr_t.size(); i++) {
-		int max_score = -INF;
-		int k = 0;
-		const string &a = lr_t[i].pattern;
-		for (int j = 0; j < lr_q.size(); j++) {
-			const string &c = lr_q[j].pattern;
-			SgResult sg;
-			if (a.length() < c.length()) {
-				const string &b = c + c;
-				sg = semi_global(a.length(), a.data(), b.length(), b.data());
+	if (opt.log_prefix) {
+		fprintf(stderr, "Outputting updated patterns and repeats\n");
+		FILE* fo = fopen((string(opt.log_prefix) + "_all_pattern.tsv").c_str(), "w");
+		assert(fo);
+		fprintf(fo, "%s\t%s\t%s\n", "ID", "Length", "Pattern");
+		for (int i = 0; i < sum_pattern; i++) {
+			if (not kept[i]) continue;
+			int pid = us_find(parent_set, i);
+			if (i < lr_t.size()) {
+				fprintf(fo, "%d\t%ld\t%s\n", pid, lr_t[i].pattern.length(), lr_t[i].pattern.data());
 			} else {
-				const string &b = a + a;
-				sg = semi_global(c.length(), c.data(), b.length(), b.data());
-			}
-			if (sg.score > max_score) {
-				max_score = sg.score;
-				k = j;
+				int j = i - lr_t.size();
+				fprintf(fo, "%d\t%ld\t%s\n", pid, lr_t[j].pattern.length(), lr_t[j].pattern.data());
 			}
 		}
-		// Select shorter pattern
-		if (a.length() < lr_q[k].pattern.length()) {
-			map_t[i] = k;
-		} else {
-			map_q[k] = i;
+		fclose(fo);
+
+		fo = fopen((string(opt.log_prefix) + "_t_reps.tsv").c_str(), "w");
+		assert(fo);
+		fprintf(fo, "%s\t%s\t%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len", "mis", "gap");
+		for (int i = 0; i < lr_t.size(); i++) {
+			int pid = lr_t[i].pid;
+			for (const RepInterval &r: lr_t[i].repeats) {
+				fprintf(fo, "%d\t%d\t%d\t%d\t%d\t%d\n", pid, r.beg, r.end, r.end - r.beg, r.mis, r.gap);
+			}
 		}
+		fclose(fo);
+
+		fo = fopen((string(opt.log_prefix) + "_q_reps.tsv").c_str(), "w");
+		assert(fo);
+		fprintf(fo, "%s\t%s\t%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len", "mis", "gap");
+		for (int i = 0; i < lr_q.size(); i++) {
+			int pid = lr_q[i].pid;
+			for (const RepInterval &r: lr_q[i].repeats) {
+				fprintf(fo, "%d\t%d\t%d\t%d\t%d\t%d\n", pid, r.beg, r.end, r.end - r.beg, r.mis, r.gap);
+			}
+		}
+		fclose(fo);
 	}
 
-	{
-		const string &pattern = lr_q[0].pattern;
-		for (int i = 0; i < 3; i++) {
-			if (i == 1) continue;
-			LongRepeats &lr = lr_t[i];
-			fprintf(stderr, "Q pattern %d normalizes T repeats %d, size=%ld\n", 0, i, lr.repeats.size());
-			int low = lr.repeats.front().beg;
-			int high = lr.repeats.back().end;
-			int len = high - low;
-			const char *s = t_seq + low;
-			lr = normalize_repeats(opt, pattern.length(), pattern.data(), len, s);
-			fprintf(stderr, "Done! T repeats size: %ld\n", lr.repeats.size());
-			q_sum = 0;
-			for (RepInterval &r: lr.repeats) {
-				r.beg += low;
-				r.end += low;
-				q_sum += r.end - r.beg;
-			}
-			fprintf(stderr, "T repeats fraction[%%]: %.2f, range=[%d,%d)\n", 100.0 * q_sum / t_len, lr.repeats.front().beg, lr.repeats.back().end);
-		}
-	}
+	// TODO: how to process singleton patterns?
 
 	int n = 0, m = 0;
-	for (const LongRepeats &lr: lr_t) n += lr.repeats.size();
-	for (const LongRepeats &lr: lr_q) m += lr.repeats.size();
-	vector<vector<int>> matrix(n);
-	for (int i = 0; i < n; i++) matrix[i].resize(m, -INF);
+	t_sum = 0; q_sum = 0;
+	for (LongRepeats &lr: lr_t) {
+		lr.base_idx = n;
+		n += lr.repeats.size();
+		for (const RepInterval &r: lr.repeats) {
+			t_sum += r.end - r.beg;
+		}
+	}
+	for (LongRepeats &lr: lr_q) {
+		lr.base_idx = m;
+		m += lr.repeats.size();
+		for (const RepInterval &r: lr.repeats) {
+			q_sum += r.end - r.beg;
+		}
+	}
+	fprintf(stderr, "T: %d repeats, fraction=%.2f %%\n", n, 100.0 * t_sum / t_len);
+	fprintf(stderr, "Q: %d repeats, fraction=%.2f %%\n", m, 100.0 * q_sum / q_len);
 
+	// Build score matrix of repeat units
 	double t_cpu = cputime(), t_real = realtime();
-	bool emat[10][10] = {false};
-	emat[0][0] = true;
-	emat[2][0] = true;
-	int cul_t = 0;
-	for (int i = 0; i < lr_t.size(); i++) {
-		int cul_q = 0;
-		for (int j = 0; j < lr_q.size(); j++) {
-			if (emat[i][j]) {
-				const LongRepeats &t = lr_t[i];
-				const LongRepeats &q = lr_q[j];
-				int os_t = t.repeats.front().beg;
-				int os_q = q.repeats.front().beg;
-				#pragma omp parallel for
-				for (int a = 0; a < t.repeats.size(); a++) {
-					const RepInterval &x = t.repeats[a];
-					for (int b = 0; b < q.repeats.size(); b++) {
-						const RepInterval &y = q.repeats[b];
-						int dis = abs((x.beg - os_t) - (y.beg - os_q));
-						if (dis < MAX_UNIT_DIS) {
-							matrix[cul_t + a][cul_q + b] = global_alignment(
-								x.end - x.beg, t_seq + x.beg, y.end - y.beg, q_seq + y.beg);
-						}
+	vector<vector<int>> matrix(n); // FIXME: memory inefficient for this sparse matrix
+	for (int i = 0; i < n; i++) matrix[i].resize(m, -INF);
+	for (const LongRepeats &lt : lr_t) {
+		int idx_t = lt.base_idx;
+		int pid_t = lt.pid;
+		for (const LongRepeats &lq : lr_q) {
+			int idx_q = lq.base_idx;
+			int pid_q = lq.pid;
+			if (pid_q != pid_t) continue;
+
+			int os_t = lt.repeats.front().beg;
+			int os_q = lq.repeats.front().beg;
+			#pragma omp parallel for
+			for (int i = 0; i < lt.repeats.size(); i++) {
+				const RepInterval &t = lt.repeats[i];
+				for (int j = 0; j < lq.repeats.size(); j++) {
+					const RepInterval &q = lq.repeats[j];
+					int dis = abs((t.beg - os_t) - (q.beg - os_q)); // Ignore the global offset
+					if (dis < MAX_UNIT_DIS) {
+						matrix[idx_t + i][idx_q + j] = global_alignment(
+							t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
 					}
 				}
 			}
-			cul_q += lr_q[i].repeats.size();
 		}
-		cul_t += lr_t[i].repeats.size();
 	}
-	fprintf(stderr, "Compare units: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
+	fprintf(stderr, "Build scoring matrix: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
 
-	// memory inefficient for spare matrix
+
 	// for (int i = 0; i < n; i++) {
 	// 	for (int j = 0; j < m; j++) {
 	// 		if (matrix[i][j] != -INF) {
@@ -2471,7 +2461,6 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	// 		}
 	// 	}
 	// }
-	// exit(1);
 
 	// TODO: set the penalty of deleting units
 	// sqrt(2 * L * max_div * mis_penalty)
@@ -2512,6 +2501,8 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	}
 	fprintf(stderr, "DP: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
 
+	// Construct alignment topology
+	t_cpu = cputime(); t_real = realtime();
 	vector<pair<int,int>> aln;
 	vector<int> t_del;
 	vector<int> q_del;
@@ -2539,25 +2530,21 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	reverse(t_del.begin(), t_del.end());
 	reverse(q_del.begin(), q_del.end());
 
-	// // TODO: process partly deleted units
-
 	int aln_len = 0, t_del_len = 0, q_del_len = 0;
 	FILE *fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_aln.tsv").c_str(), "w") :nullptr;
 	if (fo) {
-		fprintf(fo, "%s\t%s\t%s\t%s\t%s\t", "t_id", "t_prefix", "t_beg", "t_end", "t_len");
-		fprintf(fo, "%s\t%s\t%s\t%s\t%s\t", "q_id", "q_prefix", "q_beg", "q_end", "q_len");
+		fprintf(fo, "%s\t%s\t%s\t%s\t", "t_id", "t_beg", "t_end", "t_len");
+		fprintf(fo, "%s\t%s\t%s\t%s\t", "q_id", "q_beg", "q_end", "q_len");
 		fprintf(fo, "%s\t%s\t%s\n", "match", "mismatch", "gap");
 	}
 	vector<RepInterval> agg_t;
 	for (const LongRepeats &lr: lr_t) {
 		agg_t.insert(agg_t.end(), lr.repeats.begin(), lr.repeats.end());
 	}
-	cout << agg_t.size() << endl;
 	vector<RepInterval> agg_q;
 	for (const LongRepeats &lr: lr_q) {
 		agg_q.insert(agg_q.end(), lr.repeats.begin(), lr.repeats.end());
 	}
-	cout << agg_q.size() << endl;
 
 	AlnSta mut; // Small mutations
 	for (const pair<int,int> &p: aln) {
@@ -2568,34 +2555,38 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 		AlnSta res = global_cigar(t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
 		mut += res;
 		if (fo) {
-			fprintf(fo, "%d\t%d\t%d\t%d\t%d\t", i, -1, t.beg, t.end, t.end - t.beg);
-			fprintf(fo, "%d\t%d\t%d\t%d\t%d\t", j, -1, q.beg, q.end, q.end - q.beg);
+			fprintf(fo, "%d\t%d\t%d\t%d\t", i, t.beg, t.end, t.end - t.beg);
+			fprintf(fo, "%d\t%d\t%d\t%d\t", j, q.beg, q.end, q.end - q.beg);
 			fprintf(fo, "%d\t%d\t%d\n", res.match, res.mismatch, res.ins + res.del);
 		}
 	}
-	fclose(fo);
+	if (fo) fclose(fo);
 	fprintf(stderr, "Aligned length: %d, matches: %d, mismatches: %d, insertions: %d, deletions: %d\n",
 		aln_len, mut.match, mut.mismatch, mut.ins, mut.del);
 
+	// Target deletion
 	fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_t_del.tsv").c_str(), "w") :nullptr;
-	if (fo) fprintf(fo, "%s\t%s\t%s\t%s\t%s\n", "ID", "prefix", "beg", "end", "len");
+	if (fo) fprintf(fo, "%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len");
 	for (int i: t_del) {
 		const RepInterval &t = agg_t[i];
-		if (fo) fprintf(fo, "%d\t%d\t%d\t%d\t%d\n", i, -1, t.beg, t.end, t.end - t.beg);
+		if (fo) fprintf(fo, "%d\t%d\t%d\t%d\n", i, t.beg, t.end, t.end - t.beg);
 		t_del_len += t.end - t.beg;
 	}
-	fclose(fo);
+	if (fo) fclose(fo);
 	fprintf(stderr, "Target deletion length: %d\n", t_del_len);
 
+	// Query deletion
 	fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_q_del.tsv").c_str(), "w") :nullptr;
-	if (fo) fprintf(fo, "%s\t%s\t%s\t%s\t%s\n", "ID", "prefix", "beg", "end", "len");
+	if (fo) fprintf(fo, "%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len");
 	for (int j: q_del) {
 		const RepInterval &q = agg_q[j];
-		if (fo) fprintf(fo, "%d\t%d\t%d\t%d\t%d\n", j, -1, q.beg, q.end, q.end - q.beg);
+		if (fo) fprintf(fo, "%d\t%d\t%d\t%d\n", j, q.beg, q.end, q.end - q.beg);
 		q_del_len += q.end - q.beg;
 	}
-	fclose(fo);
+	if (fo) fclose(fo);
 	fprintf(stderr, "Query deletion length: %d\n", q_del_len);
+
+	fprintf(stderr, "Construct topology: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
 }
 
 int usage(const ZigOptions &o) {
