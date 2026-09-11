@@ -1884,6 +1884,59 @@ void paf_format(const string &q_name, const string &que, const string &t_name, s
 	fprintf(stdout, "cg:Z:%s\n", cigar.c_str());
 }
 
+void extended_paf_format(const string &t_name, int t_len, const string &ext_t, const string &q_name, int q_len, const string ext_q)
+{
+	assert(ext_t.length() == ext_q.length());
+	char strand = '+';
+	int matches_n = 0, mismatches_n = 0, len = ext_t.length();
+	int mapq = 60;
+
+	string cigar;
+	char op_type = '@';
+	int op_cnt = 0;
+	for (int i = 0; i < len; i++) {
+		if (ext_t[i] == '[' or ext_t[i] == ']') {
+			if (op_type != '@') {
+				cigar += to_string(op_cnt);
+				cigar += op_type;
+			}
+			cigar += ext_t[i];
+			op_type = '@';
+			op_cnt = 0;
+		} else {
+			int curr_ot;
+			if (ext_t[i] == '-') {
+				curr_ot = 'I';
+			} else if (ext_q[i] == '-') {
+				curr_ot = 'D';
+			} else {
+				curr_ot = 'M'; // Match and mismatches
+				if (ext_t[i] == ext_q[i]) matches_n++;
+				else mismatches_n++;
+			}
+
+			if (curr_ot == op_type) op_cnt++;
+			else {
+				if (op_type != '@') {
+					cigar += to_string(op_cnt);
+					cigar += op_type;
+				}
+				op_type = curr_ot;
+				op_cnt = 1;
+			}
+		}
+	}
+	if (op_type != '@' and op_cnt > 0) {
+		cigar += to_string(op_cnt);
+		cigar += op_type;
+	}
+
+	fprintf(stdout, "%s\t%d\t%d\t%d\t%c\t", q_name.c_str(), q_len, 0, q_len, strand);
+	fprintf(stdout, "%s\t%d\t%d\t%d\t", t_name.c_str(), t_len, 0, t_len);
+	fprintf(stdout, "%d\t%d\t%d\t", matches_n + mismatches_n, len, mapq);
+	fprintf(stdout, "cg:Z:%s\n", cigar.c_str());
+}
+
 void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2) {
 	pair<string, string> pair1 = input_fasta_seq(fn1);
 	pair<string, string> pair2 = input_fasta_seq(fn2);
@@ -2826,6 +2879,9 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	fprintf(stderr, "    deletion: %d, percentage: %.2f %%\n", cnt_del, 100.0 * cnt_del / t_len);
 	fprintf(stderr, "    insertion: %d, percentage: %.2f %%\n", cnt_ins, 100.0 * cnt_ins / q_len);
 	fprintf(stderr, "\n");
+
+	// Output CIGAR
+	extended_paf_format(name1, t_len, final_ct, name2, q_len, final_cq);
 }
 
 int usage(const ZigOptions &o) {
