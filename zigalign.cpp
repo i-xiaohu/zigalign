@@ -2593,8 +2593,12 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 		}
 	}
 	if (fo) fclose(fo);
-	fprintf(stderr, "Aligned length: %d, matches: %d, mismatches: %d, insertions: %d, deletions: %d\n",
-		aln_len, mut.match, mut.mismatch, mut.ins, mut.del);
+
+	double mut_rate = 100.0 * (mut.mismatch + mut.ins + mut.del) / aln_len;
+	fprintf(stderr, "Alignment between repeats:\n");
+	fprintf(stderr, "    aligned length: %d, map ratio: %.2f %%\n", aln_len, 100.0 * aln_len / min(t_len, q_len));
+	fprintf(stderr, "    matches: %d, mismatches: %d, insertions: %d, deletions: %d, mutation rate: %.2f %%\n",
+		mut.match, mut.mismatch, mut.ins, mut.del, mut_rate);
 
 	// Target deletion
 	fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_t_del.tsv").c_str(), "w") :nullptr;
@@ -2605,7 +2609,7 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 		t_del_len += t.end - t.beg;
 	}
 	if (fo) fclose(fo);
-	fprintf(stderr, "Target deletion length: %d\n", t_del_len);
+	fprintf(stderr, "    target deletion length: %d, percentage: %.2f %%\n", t_del_len, 100.0 * t_del_len / t_len);
 
 	// Query deletion
 	fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_q_del.tsv").c_str(), "w") :nullptr;
@@ -2616,88 +2620,35 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 		q_del_len += q.end - q.beg;
 	}
 	if (fo) fclose(fo);
-	fprintf(stderr, "Query deletion length: %d\n", q_del_len);
+	fprintf(stderr, "    query deletion length: %d, percentage: %.2f %%\n", q_del_len, 100.0 * q_del_len / q_len);
 
 	fprintf(stderr, "Construct topology: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
 
 	// Finalizing the alignment
-}
-
-void finalize(const ZigOptions &opt, const char *fn1, const char *fn2)
-{
-	pair<string, string> pair1 = input_fasta_seq(fn1);
-	pair<string, string> pair2 = input_fasta_seq(fn2);
-	string name1 = pair1.first, seq1 = pair1.second;
-	string name2 = pair2.first, seq2 = pair2.second;
-	int t_len = seq1.length(), q_len = seq2.length();
-	const char *t_seq = seq1.data(), *q_seq = seq2.data();
-
 	vector<RepInterval> aln_t, aln_q;
 	vector<RepInterval> del_t, del_q;
-	{
-		fstream in(string(opt.log_prefix) + "_aln.tsv");
-		assert(in.is_open());
-		string header;
-		getline(in, header);
-		int i, j, len, mat, mis, gap;
-		RepInterval t, q;
-		while (in >> i >> t.beg >> t.end >> len) {
-			in >> j >> q.beg >> q.end >> len;
-			in >> mat >> mis >> gap;
-			aln_t.push_back(t);
-			aln_q.push_back(q);
-		}
-		in.close();
+	for (auto &pair: aln) {
+		aln_t.push_back(agg_t[pair.first]);
+		aln_q.push_back(agg_q[pair.second]);
+	}
+	for (int i: t_del) {
+		del_t.push_back(agg_t[i]);
+	}
+	for (int i: q_del) {
+		del_q.push_back(agg_q[i]);
 	}
 
 	{
-		fstream in(string(opt.log_prefix) + "_t_del.tsv");
-		assert(in.is_open());
-		string header;
-		getline(in, header);
-		int i, len;
-		RepInterval t;
-		while (in >> i >> t.beg >> t.end >> len) {
-			del_t.push_back(t);
+		for (int i = 1; i < aln_t.size(); i++) {
+			assert(aln_t[i].beg >= aln_t[i-1].end);
+			assert(aln_q[i].beg >= aln_q[i-1].end);
 		}
-		in.close();
-	}
-
-	{
-		fstream in(string(opt.log_prefix) + "_q_del.tsv");
-		assert(in.is_open());
-		string header;
-		getline(in, header);
-		int i, len;
-		RepInterval q;
-		while (in >> i >> q.beg >> q.end >> len) {
-			del_q.push_back(q);
+		for (int i = 1; i < del_t.size(); i++) {
+			assert(del_t[i].end >= del_t[i-1].beg);
 		}
-		in.close();
-	}
-
-	int aln_len = 0, t_del_len = 0, q_del_len = 0;
-	for (int i = 0; i < aln_q.size(); i++) {
-		int len = min(aln_q[i].end - aln_q[i].beg, aln_t[i].end - aln_t[i].beg);
-		aln_len += len;
-	}
-	for (const auto &r: del_q) {
-		q_del_len += r.end - r.beg;
-	}
-	for (const auto &r: del_t) {
-		t_del_len += r.end - r.beg;
-	}
-	fprintf(stderr, "aln=%d, t_del=%d, q_del=%d\n", aln_len, t_del_len, q_del_len);
-
-	for (int i = 1; i < aln_t.size(); i++) {
-		assert(aln_t[i].beg >= aln_t[i-1].end);
-		assert(aln_q[i].beg >= aln_q[i-1].end);
-	}
-	for (int i = 1; i < del_t.size(); i++) {
-		assert(del_t[i].end >= del_t[i-1].beg);
-	}
-	for (int i = 1; i < del_q.size(); i++) {
-		assert(del_q[i].end >= del_q[i-1].beg);
+		for (int i = 1; i < del_q.size(); i++) {
+			assert(del_q[i].end >= del_q[i-1].beg);
+		}
 	}
 
 	string final_ct, final_cq;
@@ -2857,9 +2808,24 @@ void finalize(const ZigOptions &opt, const char *fn1, const char *fn2)
 	}
 	assert(i == q_len);
 
-	fprintf(stdout, "%s\n", final_ct.data());
-	fprintf(stdout, "%s\n", final_cq.data());
-	fprintf(stderr, "Sanity check passed\n");
+	// fprintf(stdout, "%s\n", final_ct.data());
+	// fprintf(stdout, "%s\n", final_cq.data());
+
+	int cnt_mat = 0, cnt_mis = 0, cnt_del = 0, cnt_ins = 0;
+	for (i = 0; i < final_ct.length(); i++) {
+		if (final_ct[i] == '-') cnt_ins++;
+		else if (final_cq[i] == '-') cnt_del++;
+		else if (final_cq[i] == final_ct[i]) cnt_mat++;
+		else cnt_mis++;
+	}
+
+	fprintf(stderr, "Finalized alignment: ");
+	int cnt_aln = cnt_mis + cnt_mat;
+	fprintf(stderr, "    aligned length: %d, map ratio: %.2f %%\n", cnt_aln, 100.0 * cnt_aln / min(t_len, q_len));
+	fprintf(stderr, "    mismatch: %d, percentage: %.2f %%\n", cnt_mis, 100.0 * cnt_mis / cnt_aln);
+	fprintf(stderr, "    deletion: %d, percentage: %.2f %%\n", cnt_del, 100.0 * cnt_del / t_len);
+	fprintf(stderr, "    insertion: %d, percentage: %.2f %%\n", cnt_ins, 100.0 * cnt_ins / q_len);
+	fprintf(stderr, "\n");
 }
 
 int usage(const ZigOptions &o) {
@@ -2952,8 +2918,7 @@ int main(int argc, char *argv[]) {
 
 	if (argc - optind == 2) {
 		// align_with_dups(opt, argv[optind], argv[optind+1]);
-		// align_long_seq(opt, argv[optind], argv[optind+1]);
-		finalize(opt, argv[optind], argv[optind+1]);
+		align_long_seq(opt, argv[optind], argv[optind+1]);
 	} else {
 		fprintf(stderr, "Two FASTA files are required\n");
 		return 1;
