@@ -2057,6 +2057,7 @@ int global_alignment(const int n, const char *a, const int m, const char *b)
 
 struct AlnSta {
 	int match, mismatch, ins, del;
+	string ext_a, ext_b;
 	AlnSta() {
 		match = mismatch = ins = del = 0;
 	}
@@ -2068,12 +2069,9 @@ struct AlnSta {
 	}
 };
 
+// Banded alignment is not used
 AlnSta global_cigar(const int n, const char *a, const int m, const char *b)
 {
-	const double GAP_RATIO = 0.10;
-	const int w = max(n, m) * GAP_RATIO;
-
-	// Classical SI score matrix
 	const int MAT_S = 1;
 	const int MIS_P = -4;
 	const int GAP_O = -6;
@@ -2094,9 +2092,7 @@ AlnSta global_cigar(const int n, const char *a, const int m, const char *b)
 	}
 
 	for (int i = 1; i <= n; i++) {
-		int beg = max(i - w, 1), end = min(i + w, m);
-		if (beg > end) break;
-		beg = 1; end = m;
+		int beg = 1, end = m;
 		if (beg == 1) curr_H[beg-1] = GAP_O + i * GAP_E;
 		else curr_H[beg-1] = -INF;
 		int F = -INF;
@@ -2136,14 +2132,20 @@ AlnSta global_cigar(const int n, const char *a, const int m, const char *b)
 			pj--;
 			if (a[pi] == b[pj]) ret.match++;
 			else ret.mismatch++;
+			ret.ext_a += a[pi];
+			ret.ext_b += b[pj];
 			break;
 		case VERTICAL:
 			pi--;
 			ret.del++;
+			ret.ext_a += a[pi];
+			ret.ext_b += '-';
 			break;
 		case HORIZONTAL:
 			pj--;
 			ret.ins++;
+			ret.ext_a += '-';
+			ret.ext_b += b[pj];
 			break;
 		default:
 			break;
@@ -2151,7 +2153,37 @@ AlnSta global_cigar(const int n, const char *a, const int m, const char *b)
 	}
 	// Be careful with the preceding gaps, which are introduced by wrong splitting
 	ret.ins += pi;
+	while (pi > 0) {
+		ret.ext_a += a[--pi];
+		ret.ext_b += '-';
+	}
 	ret.del += pj;
+	while (pj > 0) {
+		ret.ext_a += '-';
+		ret.ext_b += b[--pj];
+	}
+	reverse(ret.ext_a.begin(), ret.ext_a.end());
+	reverse(ret.ext_b.begin(), ret.ext_b.end());
+
+	// Sanity check
+	{
+		assert(ret.ext_a.length() == ret.ext_b.length());
+		int i = 0;
+		for (char c: ret.ext_a) {
+			if (c != '-') {
+				assert(c == a[i++]);
+			}
+		}
+		assert(i == n);
+
+		i = 0;
+		for (char c: ret.ext_b) {
+			if (c != '-') {
+				assert(c == b[i++]);
+			}
+		}
+		assert(i == m);
+	}
 	return ret;
 }
 
@@ -2587,6 +2619,260 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	fprintf(stderr, "Query deletion length: %d\n", q_del_len);
 
 	fprintf(stderr, "Construct topology: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
+
+	// Finalizing the alignment
+}
+
+void finalize(const ZigOptions &opt, const char *fn1, const char *fn2)
+{
+	pair<string, string> pair1 = input_fasta_seq(fn1);
+	pair<string, string> pair2 = input_fasta_seq(fn2);
+	string name1 = pair1.first, seq1 = pair1.second;
+	string name2 = pair2.first, seq2 = pair2.second;
+	int t_len = seq1.length(), q_len = seq2.length();
+	const char *t_seq = seq1.data(), *q_seq = seq2.data();
+
+	vector<RepInterval> aln_t, aln_q;
+	vector<RepInterval> del_t, del_q;
+	{
+		fstream in(string(opt.log_prefix) + "_aln.tsv");
+		assert(in.is_open());
+		string header;
+		getline(in, header);
+		int i, j, len, mat, mis, gap;
+		RepInterval t, q;
+		while (in >> i >> t.beg >> t.end >> len) {
+			in >> j >> q.beg >> q.end >> len;
+			in >> mat >> mis >> gap;
+			aln_t.push_back(t);
+			aln_q.push_back(q);
+		}
+		in.close();
+	}
+
+	{
+		fstream in(string(opt.log_prefix) + "_t_del.tsv");
+		assert(in.is_open());
+		string header;
+		getline(in, header);
+		int i, len;
+		RepInterval t;
+		while (in >> i >> t.beg >> t.end >> len) {
+			del_t.push_back(t);
+		}
+		in.close();
+	}
+
+	{
+		fstream in(string(opt.log_prefix) + "_q_del.tsv");
+		assert(in.is_open());
+		string header;
+		getline(in, header);
+		int i, len;
+		RepInterval q;
+		while (in >> i >> q.beg >> q.end >> len) {
+			del_q.push_back(q);
+		}
+		in.close();
+	}
+
+	int aln_len = 0, t_del_len = 0, q_del_len = 0;
+	for (int i = 0; i < aln_q.size(); i++) {
+		int len = min(aln_q[i].end - aln_q[i].beg, aln_t[i].end - aln_t[i].beg);
+		aln_len += len;
+	}
+	for (const auto &r: del_q) {
+		q_del_len += r.end - r.beg;
+	}
+	for (const auto &r: del_t) {
+		t_del_len += r.end - r.beg;
+	}
+	fprintf(stderr, "aln=%d, t_del=%d, q_del=%d\n", aln_len, t_del_len, q_del_len);
+
+	string final_ct, final_cq;
+	int jt = 0, jq = 0;
+	int long_gap_cnt = 0;
+	for (int i = 0; i <= aln_q.size(); i++) {
+		int t_beg = i == 0 ?0 :aln_t[i-1].end, t_end = i == aln_q.size() ?t_len :aln_t[i].beg;
+		int q_beg = i == 0 ?0 :aln_q[i-1].end, q_end = i == aln_q.size() ?q_len :aln_q[i].beg;
+		int gap_t_len = t_end - t_beg, gap_q_len = q_end - q_beg;
+		if (gap_t_len == 0 and gap_q_len == 0) continue; // No gap
+
+		// fprintf(stderr, "[%d,%d) t_len=%d -> [%d,%d) q_len=%d\n", t_beg, t_end, len_t, q_beg, q_end, len_q);
+
+		// Find deleted segments within the gap
+		// fprintf(stderr, "deletions in t\n");
+		vector<RepInterval> sub_t;
+		for (; jt < del_t.size(); jt++) {
+			int b = del_t[jt].beg, e = del_t[jt].end;
+			if (b >= t_beg and e <= t_end) {
+				RepInterval x = del_t[jt];
+				x.beg -= t_beg;
+				x.end -= t_beg;
+				sub_t.push_back(x);
+				// fprintf(stderr, "[%d,%d) len=%d\n", b, e, e - b);
+			} else if (b >= t_end) {
+				break;
+			}
+		}
+
+		// fprintf(stderr, "deletions in q\n");
+		vector<RepInterval> sub_q;
+		for (; jq < del_q.size(); jq++) {
+			int b = del_q[jq].beg, e = del_q[jq].end;
+			if (b >= q_beg and e <= q_end) {
+				RepInterval x = del_q[jq];
+				x.beg -= q_beg;
+				x.end -= q_beg;
+				sub_q.push_back(x);
+				// fprintf(stderr, "[%d,%d) len=%d\n", b, e, e - b);
+			} else if (b >= q_end) {
+				break;
+			}
+		}
+		// Caution: deletion-insertion runs might be caused by inaccurate partitioning
+
+		// Collect the left segments
+		string left_t;
+		vector<int> map_t;
+		const char *st = t_seq + t_beg;
+		for (int j = 0; j <= sub_t.size(); j++) {
+			int b = (j == 0) ?0 :sub_t[j-1].end;
+			int e = (j == sub_t.size()) ?gap_t_len :sub_t[j].beg;
+			for (int k = b; k < e; k++) {
+				left_t.push_back(st[k]);
+				map_t.push_back(k);
+			}
+		}
+		left_t.push_back('$'); // Guard
+		map_t.push_back(gap_t_len);
+
+		string left_q;
+		vector<int> map_q;
+		const char *sq = q_seq + q_beg;
+		for (int j = 0; j <= sub_q.size(); j++) {
+			int b = (j == 0) ?0 :sub_q[j-1].end;
+			int e = (j == sub_q.size()) ?gap_q_len :sub_q[j].beg;
+			for (int k = b; k < e; k++) {
+				left_q.push_back(sq[k]);
+				map_q.push_back(k);
+			}
+		}
+		left_q.push_back('$');
+		map_q.push_back(gap_q_len);
+
+		// Be careful with long gaps
+		if (left_t.length() > 5000 or left_q.length() > 5000) {
+			long_gap_cnt++;
+		}
+
+
+		// cerr << "Left_T: " << left_t << endl;
+		// cerr << "Left_Q: " << left_q << endl;
+		AlnSta as = global_cigar(left_t.length(), left_t.data(), left_q.length(), left_q.data());
+		const string &ext_t = as.ext_a;
+		const string &ext_q = as.ext_b;
+		// cerr << ext_t << endl;
+		// cerr << ext_q << endl;
+
+		int last_t = 0, last_q = 0;
+		int pnt_t = 0, pnt_q = 0;
+		assert(final_ct.size() == final_cq.size());
+		int kt = 0, kq = 0;
+		for (int j = 0; j < ext_t.length(); j++) {
+			if (ext_t[j] != '-') {
+				assert(ext_t[j] == left_t[pnt_t]);
+				int pos_t = map_t[pnt_t];
+				if (ext_t[j] != '$') assert(ext_t[j] == st[pos_t]);
+				// Duplication deletions between bases
+				for (; kt < sub_t.size(); kt++) {
+					int b = sub_t[kt].beg, e = sub_t[kt].end;
+					if (b >= last_t and e <= pos_t) {
+						final_ct.push_back('[');
+						final_cq.push_back('[');
+						for (int c = b; c < e; c++) {
+							final_ct.push_back(st[c]);
+							final_cq.push_back('-');
+						}
+						final_ct.push_back(']');
+						final_cq.push_back(']');
+					} else if (b >= pos_t) break;
+				}
+				last_t = pos_t;
+				pnt_t++;
+			}
+			if (ext_q[j] != '-') {
+				assert(ext_q[j] == left_q[pnt_q]);
+				int pos_q = map_q[pnt_q];
+				if (ext_q[j] != '$') assert(ext_q[j] == sq[pos_q]);
+				for (; kq < sub_q.size(); kq++) {
+					int b = sub_q[kq].beg, e = sub_q[kq].end;
+					if (b >= last_q and e <= pos_q) {
+						final_ct.push_back('[');
+						final_cq.push_back('[');
+						for (int c = b; c < e; c++) {
+							final_ct.push_back('-');
+							final_cq.push_back(sq[c]);
+						}
+						final_ct.push_back(']');
+						final_cq.push_back(']');
+					} else if (b >= pos_q) break;
+				}
+				last_q = pos_q;
+				pnt_q++;
+			}
+			if (ext_t[j] != '$') final_ct.push_back(ext_t[j]);
+			if (ext_q[j] != '$') final_cq.push_back(ext_q[j]);
+		}
+		assert(final_cq.size() == final_ct.size());
+
+		if (i < aln_q.size()) {
+			as = global_cigar(aln_t[i].end - aln_t[i].beg, t_seq + aln_t[i].beg,
+				aln_q[i].end - aln_q[i].beg, q_seq + aln_q[i].beg);
+			final_ct.push_back('[');
+			final_ct += as.ext_a;
+			final_ct.push_back(']');
+			final_cq.push_back('[');
+			final_cq += as.ext_b;
+			final_cq.push_back(']');
+		}
+	}
+	fprintf(stderr, "Found %d long gaps\n", long_gap_cnt);
+	cerr << final_ct.length() << endl;
+	cerr << final_cq.length() << endl;
+
+	// Sanity check
+	int i = 0;
+	string alphabet = "ACGT[]-";
+	for (char c: final_ct) {
+		bool ok = false;
+		for (char a: alphabet) {
+			if (c == a) {
+				ok = true;
+				break;
+			}
+		}
+		assert(ok);
+		if (c == '[' or c == ']' or c == '-') {
+			continue;
+		}
+		if (c != t_seq[i]) {
+			fprintf(stderr, "i = %d, c = %c, t = %c\n", i, c, t_seq[i]);
+		}
+		i++;
+		assert(c == t_seq[i++]);
+	}
+	assert(i == t_len);
+
+	i = 0;
+	for (char c: final_cq) {
+		if (c == '[' or c == ']' or c == '-') {
+			continue;
+		}
+		i++;
+		assert(c == q_seq[i++]);
+	}
+	assert(i == q_len);
 }
 
 int usage(const ZigOptions &o) {
@@ -2679,7 +2965,8 @@ int main(int argc, char *argv[]) {
 
 	if (argc - optind == 2) {
 		// align_with_dups(opt, argv[optind], argv[optind+1]);
-		align_long_seq(opt, argv[optind], argv[optind+1]);
+		// align_long_seq(opt, argv[optind], argv[optind+1]);
+		finalize(opt, argv[optind], argv[optind+1]);
 	} else {
 		fprintf(stderr, "Two FASTA files are required\n");
 		return 1;
