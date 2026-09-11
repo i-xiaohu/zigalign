@@ -2689,6 +2689,17 @@ void finalize(const ZigOptions &opt, const char *fn1, const char *fn2)
 	}
 	fprintf(stderr, "aln=%d, t_del=%d, q_del=%d\n", aln_len, t_del_len, q_del_len);
 
+	for (int i = 1; i < aln_t.size(); i++) {
+		assert(aln_t[i].beg >= aln_t[i-1].end);
+		assert(aln_q[i].beg >= aln_q[i-1].end);
+	}
+	for (int i = 1; i < del_t.size(); i++) {
+		assert(del_t[i].end >= del_t[i-1].beg);
+	}
+	for (int i = 1; i < del_q.size(); i++) {
+		assert(del_q[i].end >= del_q[i-1].beg);
+	}
+
 	string final_ct, final_cq;
 	int jt = 0, jq = 0;
 	int long_gap_cnt = 0;
@@ -2696,12 +2707,9 @@ void finalize(const ZigOptions &opt, const char *fn1, const char *fn2)
 		int t_beg = i == 0 ?0 :aln_t[i-1].end, t_end = i == aln_q.size() ?t_len :aln_t[i].beg;
 		int q_beg = i == 0 ?0 :aln_q[i-1].end, q_end = i == aln_q.size() ?q_len :aln_q[i].beg;
 		int gap_t_len = t_end - t_beg, gap_q_len = q_end - q_beg;
-		if (gap_t_len == 0 and gap_q_len == 0) continue; // No gap
-
 		// fprintf(stderr, "[%d,%d) t_len=%d -> [%d,%d) q_len=%d\n", t_beg, t_end, len_t, q_beg, q_end, len_q);
 
 		// Find deleted segments within the gap
-		// fprintf(stderr, "deletions in t\n");
 		vector<RepInterval> sub_t;
 		for (; jt < del_t.size(); jt++) {
 			int b = del_t[jt].beg, e = del_t[jt].end;
@@ -2710,13 +2718,10 @@ void finalize(const ZigOptions &opt, const char *fn1, const char *fn2)
 				x.beg -= t_beg;
 				x.end -= t_beg;
 				sub_t.push_back(x);
-				// fprintf(stderr, "[%d,%d) len=%d\n", b, e, e - b);
 			} else if (b >= t_end) {
 				break;
 			}
 		}
-
-		// fprintf(stderr, "deletions in q\n");
 		vector<RepInterval> sub_q;
 		for (; jq < del_q.size(); jq++) {
 			int b = del_q[jq].beg, e = del_q[jq].end;
@@ -2725,7 +2730,6 @@ void finalize(const ZigOptions &opt, const char *fn1, const char *fn2)
 				x.beg -= q_beg;
 				x.end -= q_beg;
 				sub_q.push_back(x);
-				// fprintf(stderr, "[%d,%d) len=%d\n", b, e, e - b);
 			} else if (b >= q_end) {
 				break;
 			}
@@ -2766,14 +2770,9 @@ void finalize(const ZigOptions &opt, const char *fn1, const char *fn2)
 			long_gap_cnt++;
 		}
 
-
-		// cerr << "Left_T: " << left_t << endl;
-		// cerr << "Left_Q: " << left_q << endl;
 		AlnSta as = global_cigar(left_t.length(), left_t.data(), left_q.length(), left_q.data());
 		const string &ext_t = as.ext_a;
 		const string &ext_q = as.ext_b;
-		// cerr << ext_t << endl;
-		// cerr << ext_q << endl;
 
 		int last_t = 0, last_q = 0;
 		int pnt_t = 0, pnt_q = 0;
@@ -2838,28 +2837,13 @@ void finalize(const ZigOptions &opt, const char *fn1, const char *fn2)
 		}
 	}
 	fprintf(stderr, "Found %d long gaps\n", long_gap_cnt);
-	cerr << final_ct.length() << endl;
-	cerr << final_cq.length() << endl;
 
 	// Sanity check
 	int i = 0;
-	string alphabet = "ACGT[]-";
 	for (char c: final_ct) {
-		bool ok = false;
-		for (char a: alphabet) {
-			if (c == a) {
-				ok = true;
-				break;
-			}
-		}
-		assert(ok);
 		if (c == '[' or c == ']' or c == '-') {
 			continue;
 		}
-		if (c != t_seq[i]) {
-			fprintf(stderr, "i = %d, c = %c, t = %c\n", i, c, t_seq[i]);
-		}
-		i++;
 		assert(c == t_seq[i++]);
 	}
 	assert(i == t_len);
@@ -2869,10 +2853,13 @@ void finalize(const ZigOptions &opt, const char *fn1, const char *fn2)
 		if (c == '[' or c == ']' or c == '-') {
 			continue;
 		}
-		i++;
 		assert(c == q_seq[i++]);
 	}
 	assert(i == q_len);
+
+	fprintf(stdout, "%s\n", final_ct.data());
+	fprintf(stdout, "%s\n", final_cq.data());
+	fprintf(stderr, "Sanity check passed\n");
 }
 
 int usage(const ZigOptions &o) {
