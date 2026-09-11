@@ -70,15 +70,28 @@ def plot_cigar(cigar, output_file):
     plt.savefig(output_file, dpi=300)
     plt.close()
 
-    print(f"图片已保存为 {output_file}")
-    print(f"序列1长度: {xs[-1]}, 序列2长度: {ys[-1]}")
+    print(f"Plot figure has been written to {output_file}")
+    print(f"Seq1 length: {xs[-1]}, seq2 length: {ys[-1]}")
 
-# ===== 测试 =====
+def input_cigar(fn: str):
+    if fn[-4:] == '.paf':
+        with open(fn, 'r') as f:
+            cigar = f.readline().split()[-1]
+            cigar = cigar.split(':')[-1]
+    else:
+        with open(fn, 'r') as f:
+            cigar = f.readline().strip()
+    return cigar
+
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         print('cigar2plot cigar.txt output.png')
         exit(0)
 
-    with open(sys.argv[1], 'r') as f:
-        cigar = f.readline().strip()
-    plot_cigar(cigar, sys.argv[2])
+    in_fn = sys.argv[1]
+    cigar = input_cigar(in_fn)
+    if len(sys.argv) == 2:
+        out_fn = sys.argv[1] + '_plot.png'
+    else:
+        out_fn = sys.argv[2]
+    plot_cigar(cigar, out_fn)
