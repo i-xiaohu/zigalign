@@ -54,9 +54,9 @@ struct ZigOptions {
 	ZigOptions() {
 		// Scoring parameters should be adjusted by duplication and variation rate
 		mat_score = 1;
-		mis_pen = -160; // Increased penalty for small variants, i.e., duplication indels are preferred.
-		gap_o = -240;
-		gap_e = -40;
+		mis_pen = -120; // Increased penalty for small variants, i.e., duplication indels are preferred.
+		gap_o = -180;
+		gap_e = -30;
 		min_unit_size = 100;
 		sa_mat_score = 2;
 		sa_mis_pen = -3;
