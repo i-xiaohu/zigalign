@@ -16,13 +16,8 @@
 using namespace std;
 
 const int INF = 100000000;
-const uint16_t SA_MAX_LEN = 50000; // Self-alignment max length
-const int SA_PART_LEN = 40000;
-const int NORMAL = 0;
-const int START_REP = 1;
-const int NEW_COPY = 2;
-const int WITHIN_REP = 3;
-const int END_REP = 4;
+const int SA_MAX_LEN = 50000; // Self-alignment max length
+const int PART_LEN = 40000;
 const int MAX_UNIT_DIS = 100000; // TODO: set it to be a parameter
 const double MIN_MATCH_RATIO = 0.6;
 
@@ -30,22 +25,23 @@ const bool DEBUG = false;
 
 // Zigalign parameters
 struct ZigOptions {
-	// SI Scoring matrix
+	// Scoring matrix for repeats in pairwise alignment
 	int mat_score;
 	int mis_pen;
 	int gap_o;
 	int gap_e;
-	// Minimum repeat unit size (to reduce random repeats)
+	// Minimum repeat unit size
 	int min_unit_size;
-	// Scoring matrix for tandem repeats in self-alignment (reward more and/or penalize less)
-	int tr_mat_score;
-	int tr_mis_pen;
-	int tr_gap_o;
-	int tr_gap_e;
+	// Scoring matrix for repeats in self-alignment
+	int sa_mat_score;
+	int sa_mis_pen;
+	int sa_gap_o;
+	int sa_gap_e;
 	// Penalty for opening/closing tandem repeats
 	int open_tr_pen;
 	int close_tr_pen;
 	// Penalty for deleting duplications
+	int del_unit;
 	int del_dup_o;
 	int del_dup_e;
 	// K-band size
@@ -58,16 +54,17 @@ struct ZigOptions {
 	ZigOptions() {
 		// Scoring parameters should be adjusted by duplication and variation rate
 		mat_score = 1;
-		mis_pen = -12; // Increased penalty for small variants, i.e., duplication indels are preferred.
-		gap_o = -18;
-		gap_e = -3;
+		mis_pen = -160; // Increased penalty for small variants, i.e., duplication indels are preferred.
+		gap_o = -240;
+		gap_e = -40;
 		min_unit_size = 100;
-		tr_mat_score = 2;
-		tr_mis_pen = -3;
-		tr_gap_o = -3;
-		tr_gap_e = -1;
+		sa_mat_score = 2;
+		sa_mis_pen = -3;
+		sa_gap_o = -3;
+		sa_gap_e = -1;
 		open_tr_pen = -2;
 		close_tr_pen = -6;
+		del_unit = -20;
 		del_dup_o = -6;
 		del_dup_e = -2;
 		band_width = 50;
@@ -97,23 +94,43 @@ struct Bt1Cell {
 	}
 };
 
-void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<vector<Bt1Cell>> &bt)
+struct RepInterval {
+	int beg, end; // [beg, end)
+	int mat, mis, gap; // #matches, mismatches and gaps
+
+	RepInterval() {
+		beg = end = -1;
+		mat = mis = gap = 0;
+	}
+
+	bool operator < (const RepInterval &b) const {
+		return (this->beg != b.beg) ? this->beg < b.beg : this->end < b.end;
+	}
+};
+
+vector<RepInterval> self_alignment2(const ZigOptions &o, int n, const char *seq, vector<vector<Bt1Cell>> &bt)
 {
 	if (n > SA_MAX_LEN) {
 		fprintf(stderr, "Sequence length %d exceeds the limit of self alignment %d\n", n, SA_MAX_LEN);
 		abort();
 	}
 
+	const int MIN_UNIT = o.min_unit_size;
 	const int MAT_SCORE = o.mat_score;
-	const uint16_t MIN_UNIT = o.min_unit_size;
 	const int OPEN_TR = o.open_tr_pen;
 	const int CLOSE_TR = o.close_tr_pen;
-	const int TR_MAT_SCORE = o.tr_mat_score;
-	const int TR_MIS_PEN = o.tr_mis_pen;
-	const int TR_GAP_O = o.tr_gap_o;
-	const int TR_GAP_E = o.tr_gap_e;
+	const int SA_MAT_SCORE = o.sa_mat_score;
+	const int SA_MIS_PEN = o.sa_mis_pen;
+	const int SA_GAP_O = o.sa_gap_o;
+	const int SA_GAP_E = o.sa_gap_e;
 
-	if (MAT_SCORE >= TR_MAT_SCORE) {
+	const int BT_NORMAL = 0;
+	const int BT_START_REP = 1;
+	const int BT_NEW_COPY = 2;
+	const int BT_WITHIN_REP = 3;
+	const int BT_END_REP = 4;
+
+	if (MAT_SCORE >= SA_MAT_SCORE) {
 		fprintf(stderr, "Warning: setting higher score for diagonal match can't detect tandem repeats\n");
 	}
 
@@ -122,7 +139,7 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<ve
 		for (int i = 0; i <= n; i++) {
 			bt[i].resize(i + 1);
 			if (i > 0) {
-				bt[i][i].event = NORMAL;
+				bt[i][i].event = BT_NORMAL;
 				bt[i][i].pi = 1;
 				bt[i][i].pj = i-1;
 			}
@@ -141,7 +158,7 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<ve
 	prev_dp[0].H = 0;
 	prev_dp[0].beg = 1;
 	for (int i = 1; i <= MIN_UNIT; i++) {
-		bt[i][i].event = NORMAL;
+		bt[i][i].event = BT_NORMAL;
 		bt[i][i].pi = 1;
 		bt[i][i].pj = i-1;
 	}
@@ -152,7 +169,7 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<ve
 	for (int i = MIN_UNIT + 1; i <= n; i++) {
 		for (int j = 0; j <= i; j++) curr_dp[j] = Dp1Cell();
 		curr_dp[i].H = prev_dp[i-1].H + MAT_SCORE;
-		bt[i][i].event = NORMAL;
+		bt[i][i].event = BT_NORMAL;
 		bt[i][i].pi = 1;
 		bt[i][i].pj = i-1;
 		curr_dp[i].beg = prev_dp[i-1].beg;
@@ -160,22 +177,22 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<ve
 		int max_value = (i-1) * MAT_SCORE; // From non-repetitive region (NOTE: decreased score)
 		int t_beg = prev_dp[i-1].beg; // To prevent illegal path
 		int t_end = i - 1;
-		uint8_t event = START_REP;
+		uint8_t event = BT_START_REP;
 		for (int j = 1; j < i-1; j++) {
 			// Start new copy at the end of duplications
 			if (prev_dp[j].end == j and prev_dp[j].H > max_value) {
 				max_value = prev_dp[j].H;
 				t_beg = prev_dp[j].beg;
 				t_end = j;
-				event = NEW_COPY;
+				event = BT_NEW_COPY;
 			}
 		}
 
 		// FIXME: maximum value should be chosen from overlapping template intervals
 		// D transfer
 		for (int j = t_beg; j <= t_end - MIN_UNIT + 1; j++) {
-			int tmp = (seq[i-1] == seq[j-1]) ? TR_MAT_SCORE : TR_MIS_PEN;
-			int pen = (event == START_REP) ? OPEN_TR : 0; // No penalty for new copy
+			int tmp = (seq[i-1] == seq[j-1]) ? SA_MAT_SCORE : SA_MIS_PEN;
+			int pen = (event == BT_START_REP) ? OPEN_TR : 0; // No penalty for new copy
 			curr_dp[j].D = max_value + tmp + pen;
 			curr_dp[j].beg = j;
 			curr_dp[j].end = t_end;
@@ -184,11 +201,11 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<ve
 			bt[i][j].pj = t_end;
 		}
 		for (int j = t_end - MIN_UNIT + 2; j <= i - MIN_UNIT; j++) {
-			int tmp = (seq[i-1] == seq[j-1]) ? TR_MAT_SCORE : TR_MIS_PEN;
+			int tmp = (seq[i-1] == seq[j-1]) ? SA_MAT_SCORE : SA_MIS_PEN;
 			curr_dp[j].D = (i - 1) * MAT_SCORE + tmp + OPEN_TR;
 			curr_dp[j].beg = j;
 			curr_dp[j].end = i - 1;
-			bt[i][j].event = START_REP;
+			bt[i][j].event = BT_START_REP;
 			bt[i][j].pi = 1;
 			bt[i][j].pj = i - 1;
 		}
@@ -197,15 +214,15 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<ve
 		for (int j = 1; j < i; j++) {
 			int v_score = -INF, h_score = -INF, d_score = -INF;
 			if (j >= prev_dp[j].beg and j <= prev_dp[j].end) {
-				v_score = max(max(prev_dp[j].D, prev_dp[j].H) + TR_GAP_O, prev_dp[j].E) + TR_GAP_E;
+				v_score = max(max(prev_dp[j].D, prev_dp[j].H) + SA_GAP_O, prev_dp[j].E) + SA_GAP_E;
 				curr_dp[j].E = v_score;
 			}
 			if (j >= curr_dp[j-1].beg and j <= curr_dp[j-1].end) {
-				h_score = max(max(curr_dp[j-1].D, curr_dp[j-1].H) + TR_GAP_O, curr_dp[j-1].F) + TR_GAP_E;
+				h_score = max(max(curr_dp[j-1].D, curr_dp[j-1].H) + SA_GAP_O, curr_dp[j-1].F) + SA_GAP_E;
 				curr_dp[j].F = h_score;
 			}
 			if (j >= prev_dp[j-1].beg and j <= prev_dp[j-1].end) {
-				int tmp = (seq[i-1] == seq[j-1] ? TR_MAT_SCORE : TR_MIS_PEN);
+				int tmp = (seq[i-1] == seq[j-1] ? SA_MAT_SCORE : SA_MIS_PEN);
 				d_score = max(prev_dp[j-1].D, prev_dp[j-1].H) + tmp;
 			}
 
@@ -214,7 +231,7 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<ve
 				curr_dp[j].H = v_score;
 				curr_dp[j].beg = prev_dp[j].beg;
 				curr_dp[j].end = prev_dp[j].end;
-				bt[i][j].event = WITHIN_REP;
+				bt[i][j].event = BT_WITHIN_REP;
 				bt[i][j].pi = 1;
 				bt[i][j].pj = j;
 			}
@@ -222,7 +239,7 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<ve
 				curr_dp[j].H = h_score;
 				curr_dp[j].beg = curr_dp[j-1].beg;
 				curr_dp[j].end = curr_dp[j-1].end;
-				bt[i][j].event = WITHIN_REP;
+				bt[i][j].event = BT_WITHIN_REP;
 				bt[i][j].pi = 0;
 				bt[i][j].pj = j-1;
 			}
@@ -230,7 +247,7 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<ve
 				curr_dp[j].H = d_score;
 				curr_dp[j].beg = prev_dp[j-1].beg;
 				curr_dp[j].end = prev_dp[j-1].end;
-				bt[i][j].event = WITHIN_REP;
+				bt[i][j].event = BT_WITHIN_REP;
 				bt[i][j].pi = 1;
 				bt[i][j].pj = j-1;
 			}
@@ -251,28 +268,85 @@ void self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, vector<ve
 		if (max_value + CLOSE_TR > curr_dp[i].H) {
 			curr_dp[i].H = max_value + CLOSE_TR;
 			curr_dp[i].beg = t_beg; // This variable is reused to prevent illegal path
-			bt[i][i].event = END_REP;
+			bt[i][i].event = BT_END_REP;
 			bt[i][i].pi = 0;
 			bt[i][i].pj = t_end;
 		}
 
 		swap(prev_dp, curr_dp);
 	}
+
+	// Backtrace
+	int ti = n, tj = n;
+	vector<RepInterval> reps;
+	while (ti > 0 and tj > 0) {
+		Bt1Cell t = bt[ti][tj];
+		if (t.event == BT_END_REP) {
+			assert(ti == tj); // Only main diagonal closes repetitions
+			while (t.event != BT_START_REP) {
+				ti = t.pi == 1 ?ti-1 :ti;
+				tj = t.pj;
+				t = bt[ti][tj]; // Lower-right corner of the sub-matrix
+				RepInterval u;
+				u.end = ti + 1;
+				while (t.event != BT_NEW_COPY and t.event != BT_START_REP) {
+					if (t.pi == 1 and tj == t.pj + 1) {
+						u.mis += (seq[ti - 1] != seq[tj - 1]);
+						u.mat += (seq[ti - 1] == seq[tj - 1]);
+					} else {
+						u.gap++;
+					}
+					ti = t.pi == 1 ?ti-1 :ti;
+					tj = t.pj;
+					t = bt[ti][tj];
+				}
+				// Pointer is now at the upper-left corner
+				u.mis += (seq[ti - 1] != seq[tj - 1]);
+				u.mat += (seq[ti - 1] == seq[tj - 1]);
+				u.beg = ti;
+				reps.push_back(u);
+			}
+			// Template for all copy units above
+			RepInterval tem;
+			tem.beg = tj;
+			tem.end = ti;
+			tem.mis = tem.gap = -1;
+			reps.push_back(tem);
+		}
+		ti = t.pi == 1 ?ti-1 :ti;
+		tj = t.pj;
+	}
+
+	if (reps.empty()) return reps;
+
+	// Reset to 0-based index
+	for (RepInterval &r: reps) {
+		r.beg--;
+		r.end--;
+	}
+
+	// de-overlap repeat units (tandem repeats should be neatly stacked)
+	sort(reps.begin(), reps.end());
+	int new_size = 0;
+	for (int i = 0; i < reps.size(); ) {
+		const RepInterval &x = reps[i];
+		bool kept = true;
+		int j = i + 1;
+		for (; j < reps.size(); j++) {
+			const RepInterval &y = reps[j];
+			if (y.beg >= x.end) break;
+			// Keep the longer one
+			if (y.end - y.beg >= x.end - x.beg) {
+				kept = false;
+				break;
+			}
+		}
+		if (kept) reps[new_size++] = x;
+		i = j;
+	}
+	reps.resize(new_size);
+	return reps;
 }
-
-struct RepInterval {
-	int beg, end; // [beg, end)
-	int mat, mis, gap; // #matches, mismatches and gaps
-
-	RepInterval() {
-		beg = end = -1;
-		mat = mis = gap = 0;
-	}
-
-	bool operator < (const RepInterval &b) const {
-		return (this->beg != b.beg) ? this->beg < b.beg : this->end < b.end;
-	}
-};
 
 struct WdpCell {
 	int E, F, H;
@@ -421,79 +495,6 @@ vector<RepInterval> wraparound_dp(const int pat_len, const char *pat_seq, const 
 	return segments;
 }
 
-vector<RepInterval> backtrack_repeats(uint16_t n, const char *seq, const vector<vector<Bt1Cell>> &bt)
-{
-	int ti = n, tj = n;
-	vector<RepInterval> reps;
-	while (ti > 0 and tj > 0) {
-		Bt1Cell t = bt[ti][tj];
-		if (t.event == END_REP) {
-			assert(ti == tj); // Only main diagonal closes repetitions
-			while (t.event != START_REP) {
-				ti = t.pi == 1 ?ti-1 :ti;
-				tj = t.pj;
-				t = bt[ti][tj]; // Lower-right corner of the sub-matrix
-				RepInterval u;
-				u.end = ti + 1;
-				while (t.event != NEW_COPY and t.event != START_REP) {
-					if (t.pi == 1 and tj == t.pj + 1) {
-						u.mis += (seq[ti - 1] != seq[tj - 1]);
-						u.mat += (seq[ti - 1] == seq[tj - 1]);
-					} else {
-						u.gap++;
-					}
-					ti = t.pi == 1 ?ti-1 :ti;
-					tj = t.pj;
-					t = bt[ti][tj];
-				}
-				// Pointer is now at the upper-left corner
-				u.mis += (seq[ti - 1] != seq[tj - 1]);
-				u.mat += (seq[ti - 1] == seq[tj - 1]);
-				u.beg = ti;
-				reps.push_back(u);
-			}
-			// Template for all copy units above
-			RepInterval tem;
-			tem.beg = tj;
-			tem.end = ti;
-			tem.mis = tem.gap = -1;
-			reps.push_back(tem);
-		}
-		ti = t.pi == 1 ?ti-1 :ti;
-		tj = t.pj;
-	}
-
-	if (reps.empty()) return reps;
-
-	// Reset to 0-based index
-	for (RepInterval &r: reps) {
-		r.beg--;
-		r.end--;
-	}
-
-	// de-overlap repeat units (tandem repeats should be neatly stacked)
-	sort(reps.begin(), reps.end());
-	int new_size = 0;
-	for (int i = 0; i < reps.size(); ) {
-		const RepInterval &x = reps[i];
-		bool kept = true;
-		int j = i + 1;
-		for (; j < reps.size(); j++) {
-			const RepInterval &y = reps[j];
-			if (y.beg >= x.end) break;
-			// Keep the longer one
-			if (y.end - y.beg >= x.end - x.beg) {
-				kept = false;
-				break;
-			}
-		}
-		if (kept) reps[new_size++] = x;
-		i = j;
-	}
-	reps.resize(new_size);
-	return reps;
-}
-
 // Recursive search is not efficient.
 inline int us_find(vector<int> &sid, int u) {
 	if (sid[u] != u) {
@@ -511,76 +512,6 @@ inline void us_union(vector<int> &sid, int u, int v) {
 	}
 }
 
-vector<RepInterval> shift_repeats(int n, const vector<RepInterval> &reps, vector<vector<Bt1Cell>> &bt, int pos)
-{
-	assert(pos < n);
-	vector<bool> vis(n + 1, false);
-	for (const RepInterval &r: reps) {
-		if (r.mis != -1) {
-			for (int i = r.beg; i < r.end; i++) {
-				vis[i] = true;
-			}
-		}
-	}
-	vector<int> sid(n + 1);
-	for (int i = 1; i <= n; i++) {
-		sid[i] = i;
-	}
-	int ti = n, tj = n;
-	while (ti > 0 and tj > 0) {
-		const Bt1Cell &c = bt[ti][tj];
-		// Project copies onto template
-		if (vis[ti]) us_union(sid, ti, tj);
-		ti = (c.pi == 1) ?ti-1 :ti;
-		tj = c.pj;
-	}
-
-	vector<RepInterval> ret;
-	int shift = pos; // Truncated leading bases
-	int k = 0;
-	for (; k < reps.size(); k++) {
-		const RepInterval &r = reps[k];
-		if (r.beg > shift) {
-			break;
-		}
-	}
-	if (k == 0 or reps[k-1].end <= shift) {
-		// Truncated position is not in any tandem repeat
-		for (; k < reps.size(); k++) {
-			ret.push_back(reps[k]);
-		}
-	} else {
-		assert(reps[k-1].beg <= shift and reps[k-1].end > shift);
-		RepInterval v;
-		v.beg = shift;
-		int root = us_find(sid, shift);
-		for (; k < reps.size(); k++) {
-			const RepInterval &r = reps[k];
-			bool found = false;
-			for (int i = r.beg; i < r.end; i++) {
-				if (us_find(sid, i) == root) {
-					found = true;
-					v.end = i;
-					ret.push_back(v);
-					v.beg = i;
-					break;
-				}
-			}
-			if (not found) break; // Till another group of repeats
-		}
-		// The rest of repeats are not affected by the truncation
-		for (; k < reps.size(); k++) {
-			const RepInterval &r = reps[k];
-			ret.push_back(r);
-		}
-	}
-	// printf("Shifted reps:\n");
-	// for (const RepInterval &r: ret) {
-	// 	printf("[%d, %d) mis=%d, gap=%d\n", r.beg, r.end, r.mis, r.gap);
-	// }
-	return ret;
-}
-
 struct SgResult {
 	int beg, end;
 	int score, mis, gap;
@@ -596,9 +527,9 @@ SgResult semi_global(const int n, const char *a, const int m, const char *b)
 {
 	// Classical SI score matrix
 	const int MAT_S = 1;
-	const int MIS_P = -40;
-	const int GAP_O = -60;
-	const int GAP_E = -10;
+	const int MIS_P = -4;
+	const int GAP_O = -6;
+	const int GAP_E = -1;
 	const int VERTICAL = 1;
 	const int HORIZONTAL = 2;
 	const int DIAGONAL = 3;
@@ -742,9 +673,8 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		const char *s0 = seq + global_os;
 		if (pattern.empty()) {
 			// Discover repeat pattern
-			int k = min(SA_PART_LEN, m);
-			self_alignment2(opt, k, s0, bt_mat);
-			vector<RepInterval> pool = backtrack_repeats(k, s0, bt_mat); // Multiple pattern?
+			int k = min(PART_LEN, m);
+			vector<RepInterval> pool = self_alignment2(opt, k, s0, bt_mat); // Multiple pattern?
 			vector<RepInterval> reps;
 			// Unwind nested repeats recursively to discover as short units as possible
 			while (not pool.empty()) {
@@ -754,8 +684,7 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 						reps.push_back(r);
 						continue;
 					}
-					self_alignment2(opt, r.end - r.beg, s0 + r.beg, bt_mat);
-					vector<RepInterval> tmp = backtrack_repeats(r.end - r.beg, s0 + r.beg, bt_mat);
+					vector<RepInterval> tmp = self_alignment2(opt, r.end - r.beg, s0 + r.beg, bt_mat);
 					if (tmp.empty()) reps.push_back(r);
 					else {
 						for (RepInterval &e: tmp) {
@@ -784,12 +713,12 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		}
 
 		// Multi-threaded WDP
-		int n_threads = min((m + SA_PART_LEN - 1) / SA_PART_LEN, opt.n_threads);
+		int n_threads = min((m + PART_LEN - 1) / PART_LEN, opt.n_threads);
 		#pragma omp parallel for num_threads(n_threads)
 		for (int i = 0; i < n_threads; i++) {
 			reps_bin[i].clear();
-			int os = i * SA_PART_LEN;
-			int t_len = min(m - os, SA_PART_LEN);
+			int os = i * PART_LEN;
+			int t_len = min(m - os, PART_LEN);
 			// fprintf(stderr, "thread %d, len = %d\n", i + 1, t_len);
 			const char *s = s0 + os;
 			reps_bin[i] = extend_pattern(pattern.length(), pattern.data(), t_len, s);
@@ -931,8 +860,8 @@ LongRepeats normalize_repeats(const ZigOptions &opt, int pat_len, const char *pa
 		#pragma omp parallel for
 		for (int i = 0; i < n_threads; i++) {
 			reps_bin[i].clear();
-			int os = i * SA_PART_LEN;
-			int t_len = min(m - os, SA_PART_LEN);
+			int os = i * PART_LEN;
+			int t_len = min(m - os, PART_LEN);
 			if (t_len <= 0) continue;
 			const char *s = s0 + os;
 			reps_bin[i] = extend_pattern(pat_len, pat_seq, t_len, s);
@@ -1024,6 +953,12 @@ vector<int> self_alignment(const ZigOptions &o, uint16_t n, const char *seq, con
 		out << 0 << "\t" << 0 << "\t" << te << endl;
 		out.close();
 	}
+
+	const int NORMAL = 0;
+	const int START_REP = 1;
+	const int NEW_COPY = 2;
+	const int WITHIN_REP = 3;
+	const int END_REP = 4;
 
 	// Trace back the optimal path to find tandem repeats
 	int ti = n, tj = n;
@@ -1966,36 +1901,131 @@ void align_with_dups(const ZigOptions &opt, const char *fn1, const char *fn2) {
 
 // ------------------------ //
 
-int global_alignment(const int n, const char *a, const int m, const char *b)
-{
-	const double GAP_RATIO = 0.10;
-	const int w = max(n, m) * GAP_RATIO;
+struct LocalResult {
+	int max_score;
+	int beg_a, end_a;
+	int beg_b, end_b;
+};
 
+// Use SIMD or other methods to accelerate it (banded alignment generates poor results)
+LocalResult local_alignment(const int n, const char *a, const int m, const char *b)
+{
 	// Classical SI score matrix
 	const int MAT_S = 1;
 	const int MIS_P = -4;
 	const int GAP_O = -6;
 	const int GAP_E = -1;
 
+	const int STOP = 0;
+	const int VERTICAL = 1;
+	const int HORIZONTAL = 2;
+	const int DIAGONAL = 3;
+
+	vector<int> prev_H(m + 1, 0), curr_H(m + 1, 0);
+	vector<int> prev_E(m + 1, 0), curr_E(m + 1, 0);
+	vector<vector<uint8_t>> bt(n + 1);
+	for (int i = 0; i <= n; i++) bt[i].resize(m + 1, STOP);
+	int max_score = -1;
+	int end_i = 0, end_j = 0;
+
+	for (int i = 1; i <= n; i++) {
+		int F = 0;
+		memset(curr_H.data(), 0, (m + 1) * sizeof(int));
+		for (int j = 1; j <= m; j++) {
+			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
+			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
+			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
+			if (F > curr_H[j]) {
+				curr_H[j] = F;
+				bt[i][j] = HORIZONTAL;
+			}
+			if (curr_E[j] > curr_H[j]) {
+				curr_H[j] = curr_E[j];
+				bt[i][j] = VERTICAL;
+			}
+			if (M > curr_H[j]) {
+				curr_H[j] = M;
+				bt[i][j] = DIAGONAL;
+			}
+			if (curr_H[j] > max_score) {
+				max_score = curr_H[j];
+				end_i = i;
+				end_j = j;
+			}
+		}
+		swap(prev_H, curr_H);
+		swap(prev_E, curr_E);
+	}
+
+	int pi = end_i, pj = end_j;
+	string ext_a, ext_b, align;
+	while (bt[pi][pj] != STOP) {
+		switch (bt[pi][pj]) {
+		case DIAGONAL:
+			ext_a += a[--pi];
+			ext_b += b[--pj];
+			align += (a[pi] == b[pj] ?' ' :'X');
+			break;
+		case VERTICAL:
+			ext_a += a[--pi];
+			ext_b += '-';
+			align += ' ';
+			break;
+		case HORIZONTAL:
+			ext_a += ' ';
+			ext_b += b[--pj];
+			align += ' ';
+			break;
+		default:
+			break;
+		}
+	}
+	reverse(ext_a.begin(), ext_a.end());
+	reverse(ext_b.begin(), ext_b.end());
+	reverse(align.begin(), align.end());
+
+	// cout << ext_a << endl;
+	// cout << align << endl;
+	// cout << ext_b << endl;
+	// printf("[%d, %d) aligns with [%d, %d), max_score=%d\n", pi, end_i, pj, end_j, max_score);
+
+	LocalResult ret;
+	ret.max_score = max_score;
+	ret.beg_a = pi;
+	ret.end_a = end_i;
+	ret.beg_b = pj;
+	ret.end_b = end_j;
+	return ret;
+}
+
+int global_alignment(const ZigOptions &opt, const int n, const char *a, const int m, const char *b)
+{
+	const int UNIT_MAT_S = opt.mat_score;
+	const int UNIT_MIS_P = opt.mis_pen;
+	const int UNIT_GAP_O = opt.gap_o;
+	const int UNIT_GAP_E = opt.gap_e;
+	const double GAP_RATIO = 0.10;
+	const int w = max(n, m) * GAP_RATIO;
+
 	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
 	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
 	prev_H[0] = 0;
 	for (int i = 1; i <= m; i++) {
-		prev_H[i] = prev_E[i] = GAP_O + i * GAP_E;
+		prev_H[i] = prev_E[i] = UNIT_GAP_O + i * UNIT_GAP_E;
 	}
 
 	int ret = -INF;
 	for (int i = 1; i <= n; i++) {
 		int beg = max(i - w, 1), end = min(i + w, m);
 		if (beg > end) break;
-		if (beg == 1) curr_H[beg-1] = GAP_O + i * GAP_E;
+		if (beg == 1) curr_H[beg-1] = UNIT_GAP_O + i * UNIT_GAP_E;
 		else curr_H[beg-1] = -INF;
 		int F = -INF;
 		int max_score = -INF;
 		for (int j = beg; j <= end; j++) {
-			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
-			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
-			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
+			F = max(F, curr_H[j-1] + UNIT_GAP_O) + UNIT_GAP_E;
+			curr_E[j] = max(prev_E[j], prev_H[j] + UNIT_GAP_O) + UNIT_GAP_E;
+			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?UNIT_MAT_S :UNIT_MIS_P);
 			curr_H[j] = max(F, M);
 			curr_H[j] = max(curr_H[j], curr_E[j]);
 			max_score = max(max_score, curr_H[j]);
@@ -2026,12 +2056,12 @@ struct AlnSta {
 };
 
 // Banded alignment is not used
-AlnSta global_cigar(const int n, const char *a, const int m, const char *b)
+AlnSta global_cigar(const ZigOptions &opt, const int n, const char *a, const int m, const char *b)
 {
-	const int MAT_S = 1;
-	const int MIS_P = -40;
-	const int GAP_O = -60;
-	const int GAP_E = -10;
+	const int UNIT_MAT_S = opt.mat_score;
+	const int UNIT_MIS_P = opt.mis_pen;
+	const int UNIT_GAP_O = opt.gap_o;
+	const int UNIT_GAP_E = opt.gap_e;
 	const int VERTICAL = 1;
 	const int HORIZONTAL = 2;
 	const int DIAGONAL = 3;
@@ -2040,7 +2070,7 @@ AlnSta global_cigar(const int n, const char *a, const int m, const char *b)
 	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
 	prev_H[0] = 0;
 	for (int i = 1; i <= m; i++) {
-		prev_H[i] = prev_E[i] = GAP_O + i * GAP_E;
+		prev_H[i] = prev_E[i] = UNIT_GAP_O + i * UNIT_GAP_E;
 	}
 	vector<vector<uint8_t>> bt(n + 1);
 	for (int i = 0; i <= n; i++) {
@@ -2049,14 +2079,14 @@ AlnSta global_cigar(const int n, const char *a, const int m, const char *b)
 
 	for (int i = 1; i <= n; i++) {
 		int beg = 1, end = m;
-		if (beg == 1) curr_H[beg-1] = GAP_O + i * GAP_E;
+		if (beg == 1) curr_H[beg-1] = UNIT_GAP_O + i * UNIT_GAP_E;
 		else curr_H[beg-1] = -INF;
 		int F = -INF;
 		int max_score = -INF;
 		for (int j = beg; j <= end; j++) {
-			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
-			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
-			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
+			F = max(F, curr_H[j-1] + UNIT_GAP_O) + UNIT_GAP_E;
+			curr_E[j] = max(prev_E[j], prev_H[j] + UNIT_GAP_O) + UNIT_GAP_E;
+			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?UNIT_MAT_S :UNIT_MIS_P);
 			if (F > M) {
 				curr_H[j] = F;
 				bt[i][j] = HORIZONTAL;
@@ -2192,9 +2222,208 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 		}
 		fclose(fo);
 	}
+	int t_sum = 0, q_sum = 0;
+	for (const LongRepeats &lr: lr_t) {
+		for (const RepInterval &r: lr.repeats) {
+			t_sum += r.end - r.beg;
+		}
+	}
+	for (const LongRepeats &lr: lr_q) {
+		for (const RepInterval &r: lr.repeats) {
+			q_sum += r.end - r.beg;
+		}
+	}
+	fprintf(stderr, "Target repeat fraction[%%]: %.2f\n", 100.0 * t_sum / t_len);
+	fprintf(stderr, "Query repeat fraction[%%]: %.2f\n", 100.0 * q_sum / q_len);
+
+	// Compare patterns pairwise
+	int sum_pattern = lr_q.size() + lr_t.size();
+	vector<int> parent_set(sum_pattern);
+	for (int i = 0; i < sum_pattern; i++) {
+		parent_set[i] = i;
+	}
+	const int MAX_PATTERN_DIS = 500000;
+	for (int i = 0; i < lr_t.size(); i++) {
+		const string &a = lr_t[i].pattern;
+		int max_value = -INF, max_id = -1;
+		int t_beg = lr_t[i].repeats.front().beg;
+		int t_end = lr_t[i].repeats.back().end;
+		for (int j = 0; j < lr_q.size(); j++) {
+			const string &b = lr_q[j].pattern;
+			int q_beg = lr_q[j].repeats.front().beg;
+			int q_end = lr_q[j].repeats.back().end;
+			int dis = max(t_beg, q_beg) - min(t_end, q_end);
+			if (dis > MAX_PATTERN_DIS) {
+				continue;
+			}
+
+			// fprintf(stderr, "%d(%ld) -> %d(%ld)\t", i, a.length(), j, b.length());
+			string c = b + b;
+			SgResult sg = semi_global(a.length(), a.data(), c.length(), c.data());
+			double mat_ratio = 1.0 - 1.0 * (sg.mis + sg.gap) / a.length();
+			// fprintf(stderr, "[%d,%d) sim=%.2f\n", sg.beg, sg.end, mat_ratio);
+			if (mat_ratio < MIN_MATCH_RATIO) continue;
+			if (sg.score > max_value) {
+				max_value = sg.score;
+				max_id = j;
+			}
+		}
+		if (max_id != -1) {
+			// fprintf(stderr, "Union %d %d\n", i, max_id);
+			us_union(parent_set, i, lr_t.size() + max_id);
+		}
+	}
+	for (int i = 0; i < lr_q.size(); i++) {
+		const string &a = lr_q[i].pattern;
+		int max_value = -INF, max_id = -1;
+		int q_beg = lr_q[i].repeats.front().beg;
+		int q_end = lr_q[i].repeats.back().end;
+		for (int j = 0; j < lr_t.size(); j++) {
+			const string &b = lr_t[j].pattern;
+			int t_beg = lr_t[j].repeats.front().beg;
+			int t_end = lr_t[j].repeats.back().end;
+			int dis = max(t_beg, q_beg) - min(t_end, q_end);
+			if (dis > MAX_PATTERN_DIS) {
+				continue;
+			}
+
+			// fprintf(stderr, "%d(%ld) -> %d(%ld)\t", i, a.length(), j, b.length());
+			string c = b + b;
+			SgResult sg = semi_global(a.length(), a.data(), c.length(), c.data());
+			double mat_ratio = 1.0 - 1.0 * (sg.mis + sg.gap) / a.length();
+			// fprintf(stderr, "[%d,%d) sim=%.2f\n", sg.beg, sg.end, mat_ratio);
+			if (mat_ratio < MIN_MATCH_RATIO) continue;
+			if (sg.score > max_value) {
+				max_value = sg.score;
+				max_id = j;
+			}
+		}
+		if (max_id != -1) {
+			// fprintf(stderr, "Union %d %d\n", max_id, i);
+			us_union(parent_set, i + lr_t.size(), max_id);
+		}
+	}
+	vector<int> same_pat[sum_pattern];
+	for (int i = 0; i < sum_pattern; i++) {
+		int k = us_find(parent_set, i);
+		// fprintf(stderr, "parent[%d] = %d\n", i, k);
+		same_pat[k].push_back(i);
+		if (i < lr_t.size()) lr_t[i].pid = k;
+		else lr_q[i - lr_t.size()].pid = k;
+	}
+
+	// Normalize repeats
+	int count = 0;
+	vector<bool> kept(sum_pattern, false);
+	for (const vector<int> &x: same_pat) {
+		if (x.empty()) continue;
+		// fprintf(stderr, "cluster %d:\n", ++count);
+		int max_range = 0, max_id = -1;
+		for (int i: x) {
+			int len = 0;
+			if (i < lr_t.size()) {
+				const string &p = lr_t[i].pattern;
+				const vector<RepInterval> &r = lr_t[i].repeats;
+				len = r.back().end - r.front().beg;
+				// fprintf(stderr, "i=%d, len=%ld, pattern:%s\n", i, p.length(), p.data());
+			} else {
+				int j = i - lr_t.size();
+				const string &p = lr_q[j].pattern;
+				const vector<RepInterval> &r = lr_q[j].repeats;
+				len = r.back().end - r.front().beg;
+				// fprintf(stderr, "j=%d, len=%ld, pattern:%s\n", j, p.length(), p.data());
+			}
+			if (len > max_range) {
+				max_range = len;
+				max_id = i;
+			}
+		}
+		if (max_id == -1) continue;
+		kept[max_id] = true;
+
+		// Use the pattern with the longest repeat length to normalize other repeats
+		string p;
+		if (max_id < lr_t.size()) p = lr_t[max_id].pattern;
+		else p = lr_q[max_id - lr_t.size()].pattern;
+		int pid = us_find(parent_set, max_id);
+		for (int i: x) {
+			if (i == max_id) continue;
+			LongRepeats lr;
+			if (i < lr_t.size()) {
+				vector<RepInterval> &r = lr_t[i].repeats;
+				int os = r.front().beg;
+				int len = r.back().end - r.front().beg;
+				const char *s = t_seq + os;
+				lr = normalize_repeats(opt, p.length(), p.data(), len, s);
+				lr_t[i].pid = pid;
+				lr_t[i].pattern = p;
+				lr_t[i].repeats = lr.repeats;
+				for (RepInterval &t: lr_t[i].repeats) {
+					t.beg += os;
+					t.end += os;
+				}
+			} else {
+				int j = i - lr_t.size();
+				const vector<RepInterval> &r = lr_q[j].repeats;
+				int os = r.front().beg;
+				int len = r.back().end - r.front().beg;
+				const char *s = q_seq + os;
+				lr = normalize_repeats(opt, p.length(), p.data(), len, s);
+				lr_q[j].pid = pid;
+				lr_q[j].pattern = p;
+				lr_q[j].repeats = lr.repeats;
+				for (RepInterval &t: lr_q[j].repeats) {
+					t.beg += os;
+					t.end += os;
+				}
+			}
+		}
+	}
+
+	if (opt.log_prefix) {
+		fprintf(stderr, "Outputting updated patterns and repeats\n");
+		FILE* fo = fopen((string(opt.log_prefix) + "_all_pattern.tsv").c_str(), "w");
+		assert(fo);
+		fprintf(fo, "%s\t%s\t%s\n", "ID", "Length", "Pattern");
+		for (int i = 0; i < sum_pattern; i++) {
+			if (not kept[i]) continue;
+			int pid = us_find(parent_set, i);
+			if (i < lr_t.size()) {
+				fprintf(fo, "%d\t%ld\t%s\n", pid, lr_t[i].pattern.length(), lr_t[i].pattern.data());
+			} else {
+				int j = i - lr_t.size();
+				fprintf(fo, "%d\t%ld\t%s\n", pid, lr_t[j].pattern.length(), lr_t[j].pattern.data());
+			}
+		}
+		fclose(fo);
+
+		fo = fopen((string(opt.log_prefix) + "_t_reps.tsv").c_str(), "w");
+		assert(fo);
+		fprintf(fo, "%s\t%s\t%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len", "mis", "gap");
+		for (int i = 0; i < lr_t.size(); i++) {
+			int pid = lr_t[i].pid;
+			for (const RepInterval &r: lr_t[i].repeats) {
+				fprintf(fo, "%d\t%d\t%d\t%d\t%d\t%d\n", pid, r.beg, r.end, r.end - r.beg, r.mis, r.gap);
+			}
+		}
+		fclose(fo);
+
+		fo = fopen((string(opt.log_prefix) + "_q_reps.tsv").c_str(), "w");
+		assert(fo);
+		fprintf(fo, "%s\t%s\t%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len", "mis", "gap");
+		for (int i = 0; i < lr_q.size(); i++) {
+			int pid = lr_q[i].pid;
+			for (const RepInterval &r: lr_q[i].repeats) {
+				fprintf(fo, "%d\t%d\t%d\t%d\t%d\t%d\n", pid, r.beg, r.end, r.end - r.beg, r.mis, r.gap);
+			}
+		}
+		fclose(fo);
+	}
+
+	// TODO: how to process singleton patterns?
 
 	int n = 0, m = 0;
-	int t_sum = 0, q_sum = 0;
+	t_sum = 0; q_sum = 0;
 	for (LongRepeats &lr: lr_t) {
 		lr.base_idx = n;
 		n += lr.repeats.size();
@@ -2214,7 +2443,6 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 
 	// Build score matrix of repeat units
 	double t_cpu = cputime(), t_real = realtime();
-	const int MAX_TR_DIS = 1000000;
 	vector<vector<int>> matrix(n); // FIXME: memory inefficient for this sparse matrix
 	for (int i = 0; i < n; i++) matrix[i].resize(m, -INF);
 	for (const LongRepeats &lt : lr_t) {
@@ -2223,47 +2451,26 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 		for (const LongRepeats &lq : lr_q) {
 			int idx_q = lq.base_idx;
 			int pid_q = lq.pid;
-			// if (pid_q != pid_t) continue;
+			if (pid_q != pid_t) continue;
 
 			int os_t = lt.repeats.front().beg;
 			int os_q = lq.repeats.front().beg;
-			// if (abs(os_t - os_q) > MAX_TR_DIS) continue;
-
 			#pragma omp parallel for
 			for (int i = 0; i < lt.repeats.size(); i++) {
 				const RepInterval &t = lt.repeats[i];
 				for (int j = 0; j < lq.repeats.size(); j++) {
 					const RepInterval &q = lq.repeats[j];
 					int dis = abs((t.beg - os_t) - (q.beg - os_q)); // Ignore the global offset
-					if (dis > MAX_UNIT_DIS) continue;
-
-					// Considering pattern rotation, flanking units are included
-					string qs;
-					qs.resize(q.end - q.beg);
-					memcpy((char*) qs.data(), q_seq + q.beg, q.end - q.beg);
-					qs += qs;
-					SgResult sg = semi_global(t.end - t.beg, t_seq + t.beg, qs.length(), qs.data());
-					matrix[idx_t + i][idx_q + j] = sg.score;
+					if (dis < MAX_UNIT_DIS) {
+						matrix[idx_t + i][idx_q + j] = global_alignment(
+							opt, t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
+					}
 				}
 			}
 		}
 	}
 	fprintf(stderr, "Build scoring matrix: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
 
-	if (opt.log_prefix) {
-		FILE *fo = fopen((string(opt.log_prefix) + "_matrix.txt").c_str(), "w");
-		assert(fo);
-		fprintf(fo, "%d %d\n", n, m);
-		for (int i = 0; i < n; i++) {
-			for (int j = 0; j < m; j++) {
-				fprintf(fo, "%d ", matrix[i][j]);
-			}
-			fprintf(fo, "\n");
-		}
-		fclose(fo);
-	}
-
-	exit(1);
 
 	// for (int i = 0; i < n; i++) {
 	// 	for (int j = 0; j < m; j++) {
@@ -2276,7 +2483,7 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	// TODO: set the penalty of deleting units
 	// sqrt(2 * L * max_div * mis_penalty)
 	t_cpu = cputime(); t_real = realtime();
-	const int DEL_UNIT = -20;
+	const int DEL_UNIT = opt.del_unit;
 	const int VERTICAL = 1;
 	const int HORIZONTAL = 2;
 	const int DIAGONAL = 3;
@@ -2363,7 +2570,7 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 		const RepInterval &t = agg_t[i];
 		const RepInterval &q = agg_q[j];
 		aln_len += min(t.end - t.beg, q.end - q.beg);
-		AlnSta res = global_cigar(t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
+		AlnSta res = global_cigar(opt, t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
 		mut += res;
 		if (fo) {
 			fprintf(fo, "%d\t%d\t%d\t%d\t", i, t.beg, t.end, t.end - t.beg);
@@ -2500,7 +2707,8 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 			long_gap_cnt++;
 		}
 
-		AlnSta as = global_cigar(left_t.length(), left_t.data(), left_q.length(), left_q.data());
+		// FIXME: use SI scoring matrix
+		AlnSta as = global_cigar(opt, left_t.length(), left_t.data(), left_q.length(), left_q.data());
 		const string &ext_t = as.ext_a;
 		const string &ext_q = as.ext_b;
 
@@ -2556,7 +2764,7 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 		assert(final_cq.size() == final_ct.size());
 
 		if (i < aln_q.size()) {
-			as = global_cigar(aln_t[i].end - aln_t[i].beg, t_seq + aln_t[i].beg,
+			as = global_cigar(opt, aln_t[i].end - aln_t[i].beg, t_seq + aln_t[i].beg,
 				aln_q[i].end - aln_q[i].beg, q_seq + aln_q[i].beg);
 			final_ct.push_back('[');
 			final_ct += as.ext_a;
@@ -2610,234 +2818,28 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	extended_paf_format(name1, t_len, final_ct, name2, q_len, final_cq);
 }
 
-void dev(const ZigOptions &opt, const char *fn1, const char *fn2)
-{
-	pair<string, string> pair1 = input_fasta_seq(fn1);
-	pair<string, string> pair2 = input_fasta_seq(fn2);
-	string name1 = pair1.first, seq1 = pair1.second;
-	string name2 = pair2.first, seq2 = pair2.second;
-	int t_len = seq1.length(), q_len = seq2.length();
-	const char *t_seq = seq1.data(), *q_seq = seq2.data();
-
-	vector<LongRepeats> lr_t = collect_long_repeats(opt, t_len, t_seq);
-	vector<LongRepeats> lr_q = collect_long_repeats(opt, q_len, q_seq);
-
-	ifstream in((string(opt.log_prefix) + "_matrix.txt"));
-	assert(in.is_open());
-	int n, m;
-	in >> n >> m;
-	vector<vector<int>> matrix(n);
-	for (int i = 0; i < n; i++) matrix[i].resize(m, -INF);
-	for (int i = 0; i < n; i++) {
-		for (int j = 0; j < m; j++) {
-			in >> matrix[i][j];
-		}
-	}
-	in.close();
-
-	double t_cpu = cputime(), t_real = realtime();
-	const int DEL_UNIT = -20;
-	const int VERTICAL = 1;
-	const int HORIZONTAL = 2;
-	const int DIAGONAL = 3;
-	vector<vector<int>> dp(n + 1);
-	vector<vector<uint8_t>> bt(n + 1);
-	for (int i = 0; i <= n; i++) {
-		dp[i].resize(m + 1, -INF);
-		bt[i].resize(m + 1, 0);
-	}
-	dp[0][0] = 0;
-	for (int j = 1; j <= m; j++) {
-		dp[0][j] = DEL_UNIT * j;
-	}
-	for (int i = 1; i <= n; i++) {
-		dp[i][0] = DEL_UNIT * i;
-		for (int j = 1; j <= m; j++) {
-			int v = dp[i-1][j] + DEL_UNIT;
-			int h = dp[i][j-1] + DEL_UNIT;
-			int d = dp[i-1][j-1] + matrix[i-1][j-1];
-			if (v > dp[i][j]) {
-				dp[i][j] = v;
-				bt[i][j] = VERTICAL;
-			}
-			if (h > dp[i][j]) {
-				dp[i][j] = h;
-				bt[i][j] = HORIZONTAL;
-			}
-			if (d > dp[i][j]) {
-				dp[i][j] = d;
-				bt[i][j] = DIAGONAL;
-			}
-		}
-	}
-	fprintf(stderr, "DP: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
-
-	// Construct alignment topology
-	t_cpu = cputime(); t_real = realtime();
-	vector<pair<int,int>> aln;
-	vector<int> t_del;
-	vector<int> q_del;
-	int pi = n, pj = m;
-	while (bt[pi][pj] != 0) {
-		switch (bt[pi][pj]) {
-		case DIAGONAL:
-			pi--;
-			pj--;
-			aln.emplace_back(make_pair(pi, pj));
-			break;
-		case VERTICAL:
-			pi--;
-			t_del.push_back(pi);
-			break;
-		case HORIZONTAL:
-			pj--;
-			q_del.push_back(pj);
-			break;
-		default:
-			break;
-		}
-	}
-	reverse(aln.begin(), aln.end());
-	reverse(t_del.begin(), t_del.end());
-	reverse(q_del.begin(), q_del.end());
-
-	int aln_len = 0, t_del_len = 0, q_del_len = 0;
-	vector<RepInterval> agg_t;
-	for (const LongRepeats &lr: lr_t) {
-		agg_t.insert(agg_t.end(), lr.repeats.begin(), lr.repeats.end());
-	}
-	vector<RepInterval> agg_q;
-	for (const LongRepeats &lr: lr_q) {
-		agg_q.insert(agg_q.end(), lr.repeats.begin(), lr.repeats.end());
-	}
-
-	vector<RepInterval> aln_t, aln_q;
-	vector<RepInterval> del_t, del_q;
-
-	FILE *fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_aln.tsv").c_str(), "w") :nullptr;
-	if (fo) {
-		fprintf(fo, "%s\t%s\t%s\t%s\t", "t_id", "t_beg", "t_end", "t_len");
-		fprintf(fo, "%s\t%s\t%s\t%s\t", "q_id", "q_beg", "q_end", "q_len");
-		fprintf(fo, "%s\t%s\t%s\n", "match", "mismatch", "gap");
-	}
-
-	AlnSta mut; // Small mutations
-	for (const pair<int,int> &p: aln) {
-		int i = p.first, j = p.second;
-		const RepInterval &t = agg_t[i];
-		const RepInterval &q = agg_q[j];
-		string qs;
-		qs.resize(q.end - q.beg);
-		memcpy((char*) qs.data(), q_seq + q.beg, q.end - q.beg);
-		qs += qs;
-		SgResult sg = semi_global(t.end - t.beg, t_seq + t.beg, qs.length(), qs.data());
-		const char *nq = qs.data() + sg.beg;
-
-		aln_q.push_back(q);
-		aln_t.push_back(t);
-		aln_len += min(t.end - t.beg, q.end - q.beg);
-		AlnSta res = global_cigar(t.end - t.beg, t_seq + t.beg, sg.end - sg.beg, nq);
-		mut += res;
-
-		if (fo) {
-			fprintf(fo, "%d\t%d\t%d\t%d\t", i, t.beg, t.end, t.end - t.beg);
-			fprintf(fo, "%d\t%d\t%d\t%d\t", j, q.beg, q.end, q.end - q.beg);
-			fprintf(fo, "%d\t%d\t%d\n", res.match, res.mismatch, res.ins + res.del);
-		}
-	}
-	if (fo) fclose(fo);
-
-	double mut_rate = 100.0 * (mut.mismatch + mut.ins + mut.del) / aln_len;
-	fprintf(stderr, "Alignment between repeats:\n");
-	fprintf(stderr, "    aligned length: %d, map ratio: %.2f %%\n", aln_len, 100.0 * aln_len / min(t_len, q_len));
-	fprintf(stderr, "    matches: %d, mismatches: %d, insertions: %d, deletions: %d, mutation rate: %.2f %%\n",
-		mut.match, mut.mismatch, mut.ins, mut.del, mut_rate);
-
-	// There might be overlapping repeats due to DP
-	int cnt = 0;
-	for (int i = 1; i < aln_q.size(); i++) {
-		if (aln_q[i].end <= aln_q[i-1].end) {
-			fprintf(stderr, "[%d, %d) vs [%d, %d)\n",
-				aln_q[i-1].beg, aln_q[i-1].end, aln_q[i].beg, aln_q[i].end);
-		}
-		// assert(aln_q[i].end > aln_q[i-1].end);
-		if (aln_q[i].beg < aln_q[i-1].end) {
-			cnt++;
-			aln_q[i].beg = aln_q[i-1].end;
-			// It shouldn't happen!
-			if (aln_q[i].beg > aln_q[i].end) {
-				aln_q[i].beg = aln_q[i].end;
-			}
-		}
-	}
-	fprintf(stderr, "Correct %d overlapping repeats\n", cnt);
-
-	for (int i: t_del) {
-		del_t.push_back(agg_t[i]);
-	}
-	for (int i: q_del) {
-		del_q.push_back(agg_q[i]);
-	}
-
-	{
-		for (int i = 1; i < aln_t.size(); i++) {
-			assert(aln_t[i].beg >= aln_t[i-1].end);
-			assert(aln_q[i].beg >= aln_q[i-1].end);
-		}
-		for (int i = 1; i < del_t.size(); i++) {
-			assert(del_t[i].end >= del_t[i-1].beg);
-		}
-		for (int i = 1; i < del_q.size(); i++) {
-			assert(del_q[i].end >= del_q[i-1].beg);
-		}
-	}
-
-	// Target deletion
-	fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_t_del.tsv").c_str(), "w") :nullptr;
-	if (fo) fprintf(fo, "%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len");
-	for (int i: t_del) {
-		const RepInterval &t = agg_t[i];
-		if (fo) fprintf(fo, "%d\t%d\t%d\t%d\n", i, t.beg, t.end, t.end - t.beg);
-		t_del_len += t.end - t.beg;
-	}
-	if (fo) fclose(fo);
-	fprintf(stderr, "    target deletion length: %d, percentage: %.2f %%\n", t_del_len, 100.0 * t_del_len / t_len);
-
-	// Query deletion
-	fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_q_del.tsv").c_str(), "w") :nullptr;
-	if (fo) fprintf(fo, "%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len");
-	for (int j: q_del) {
-		const RepInterval &q = agg_q[j];
-		if (fo) fprintf(fo, "%d\t%d\t%d\t%d\n", j, q.beg, q.end, q.end - q.beg);
-		q_del_len += q.end - q.beg;
-	}
-	if (fo) fclose(fo);
-	fprintf(stderr, "    query deletion length: %d, percentage: %.2f %%\n", q_del_len, 100.0 * q_del_len / q_len);
-}
-
 int usage(const ZigOptions &o) {
 	fprintf(stderr, "Usage: zigalign [options] seq1.fa seq2.fa > aln.paf\n");
-	fprintf(stderr, "  Regular Scoring options:\n");
+	fprintf(stderr, "  Common options:\n");
+	fprintf(stderr, "    -t [INT]  number of threads\n");
+	fprintf(stderr, "    -v [STR]  intermediate results prefix\n");
+	fprintf(stderr, "  Scoring parameters for pairwise alignment:\n");
 	fprintf(stderr, "    -A [INT]  match score [%d]\n", o.mat_score);
 	fprintf(stderr, "    -B [INT]  mismatch penalty [%d]\n", o.mis_pen);
 	fprintf(stderr, "    -O [INT]  open gap(indel) penalty [%d]\n", o.gap_o);
 	fprintf(stderr, "    -E [INT]  extend gap penalty [%d]\n", o.gap_e);
-	fprintf(stderr, "    -J [INT]  open delete duplication penalty [%d]\n", o.del_dup_o);
-	fprintf(stderr, "    -j [INT]  extend delete duplication penalty [%d]\n", o.del_dup_e);
-	fprintf(stderr, "    -v [STR]  output file prefix\n");
-	fprintf(stderr, "              matrix backtrace paths will be written to prefix_s1.txt, prefix_s2.txt and prefix_p.txt\n");
-	fprintf(stderr, "              use vis_self.py to render prefix_s1.txt and prefix_s2.txt\n");
-	fprintf(stderr, "              use vis_pair.py to render prefix_p.txt\n");
+	fprintf(stderr, "    -D [INT]  repeat unit deletion penalty [%d]\n", o.del_unit);
 	fprintf(stderr, "  Scoring options for self-alignment:\n");
 	fprintf(stderr, "    -u [INT]  minimum repeat unit size [%d]\n", o.min_unit_size);
 	fprintf(stderr, "    -d [INT]  open tandem repeat penalty [%d]\n", o.open_tr_pen);
 	fprintf(stderr, "    -p [INT]  close tandem repeat penalty [%d]\n", o.close_tr_pen);
-	fprintf(stderr, "    -a [INT]  match score [%d]\n", o.tr_mat_score);
-	fprintf(stderr, "    -b [INT]  mismatch penalty [%d]\n", o.tr_mis_pen);
-	fprintf(stderr, "    -o [INT]  open gap(indel) penalty [%d]\n", o.tr_gap_o);
-	fprintf(stderr, "    -e [INT]  extend gap penalty [%d]\n", o.tr_gap_e);
+	fprintf(stderr, "    -a [INT]  match score [%d]\n", o.sa_mat_score);
+	fprintf(stderr, "    -b [INT]  mismatch penalty [%d]\n", o.sa_mis_pen);
+	fprintf(stderr, "    -o [INT]  open gap(indel) penalty [%d]\n", o.sa_gap_o);
+	fprintf(stderr, "    -e [INT]  extend gap penalty [%d]\n", o.sa_gap_e);
 	fprintf(stderr, "Note: self-alignment scoring matrix must reward more and/or \n"
-					"  penalize less than regular matrix to discover tandem repeats.\n");
+					"  penalize less than regular matrix to discover tandem repeats.\n"
+					"  Pairwise scoring matrix must penalize discrepancies harder as DSI models do.\n");
 	return 1;
 }
 
@@ -2846,7 +2848,7 @@ int main(int argc, char *argv[]) {
 	ZigOptions opt;
 	if (argc == 1) return usage(opt);
 	int c;
-	while ((c = getopt(argc, argv, "A:B:O:E:J:j:u:d:p:a:b:o:e:k:v:t:")) >= 0) {
+	while ((c = getopt(argc, argv, "A:B:O:E:D:u:d:p:a:b:o:e:k:v:t:")) >= 0) {
 		switch (c) {
 			case 'A':
 				opt.mat_score = abs(str2int(optarg));
@@ -2860,11 +2862,8 @@ int main(int argc, char *argv[]) {
 			case 'E':
 				opt.gap_e = -abs(str2int(optarg));
 				break;
-			case 'J':
-				opt.del_dup_o = -abs(str2int(optarg));
-				break;
-			case 'j':
-				opt.del_dup_e = -abs(str2int(optarg));
+			case 'D':
+				opt.del_unit = -abs(str2int(optarg));
 				break;
 			case 'u':
 				opt.min_unit_size = abs(str2int(optarg));
@@ -2876,16 +2875,16 @@ int main(int argc, char *argv[]) {
 				opt.close_tr_pen = -abs(str2int(optarg));
 				break;
 			case 'a':
-				opt.tr_mat_score = abs(str2int(optarg));
+				opt.sa_mat_score = abs(str2int(optarg));
 				break;
 			case 'b':
-				opt.tr_mis_pen = -abs(str2int(optarg));
+				opt.sa_mis_pen = -abs(str2int(optarg));
 				break;
 			case 'o':
-				opt.tr_gap_o = -abs(str2int(optarg));
+				opt.sa_gap_o = -abs(str2int(optarg));
 				break;
 			case 'e':
-				opt.tr_gap_e = -abs(str2int(optarg));
+				opt.sa_gap_e = -abs(str2int(optarg));
 				break;
 			case 'k':
 				opt.band_width = abs(str2int(optarg));
@@ -2905,8 +2904,7 @@ int main(int argc, char *argv[]) {
 
 	if (argc - optind == 2) {
 		// align_with_dups(opt, argv[optind], argv[optind+1]);
-		// align_long_seq(opt, argv[optind], argv[optind+1]);
-		dev(opt, argv[optind], argv[optind+1]);
+		align_long_seq(opt, argv[optind], argv[optind+1]);
 	} else {
 		fprintf(stderr, "Two FASTA files are required\n");
 		return 1;
