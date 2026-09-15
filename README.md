@@ -20,9 +20,9 @@ Usage: zigalign [options] seq1.fa seq2.fa > aln.paf
     -v [STR]  intermediate results prefix
   Scoring parameters for pairwise alignment:
     -A [INT]  match score [1]
-    -B [INT]  mismatch penalty [-160]
-    -O [INT]  open gap(indel) penalty [-240]
-    -E [INT]  extend gap penalty [-40]
+    -B [INT]  mismatch penalty [-120]
+    -O [INT]  open gap(indel) penalty [-180]
+    -E [INT]  extend gap penalty [-30]
     -D [INT]  repeat unit deletion penalty [-20]
   Scoring options for self-alignment:
     -u [INT]  minimum repeat unit size [100]
