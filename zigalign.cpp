@@ -18,7 +18,6 @@ using namespace std;
 const int INF = 100000000;
 const int SA_MAX_LEN = 50000; // Self-alignment max length
 const int PART_LEN = 40000;
-const int MAX_UNIT_DIS = 100000; // TODO: set it to be a parameter
 const double MIN_MATCH_RATIO = 0.6;
 
 const bool DEBUG = false;
@@ -2004,8 +2003,8 @@ int global_alignment(const ZigOptions &opt, const int n, const char *a, const in
 	const int UNIT_MIS_P = opt.mis_pen;
 	const int UNIT_GAP_O = opt.gap_o;
 	const int UNIT_GAP_E = opt.gap_e;
-	const double GAP_RATIO = 0.10;
-	const int w = max(n, m) * GAP_RATIO;
+	const double GAP_RATIO = 0.01;
+	int w = min(n, m) * GAP_RATIO;
 
 	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
 	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
@@ -2037,7 +2036,6 @@ int global_alignment(const ZigOptions &opt, const int n, const char *a, const in
 		swap(prev_H, curr_H);
 		swap(prev_E, curr_E);
 	}
-	// if (ret < 0) ret = -INF;
 	return ret;
 }
 
@@ -2453,18 +2451,13 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 			int pid_q = lq.pid;
 			if (pid_q != pid_t) continue;
 
-			int os_t = lt.repeats.front().beg;
-			int os_q = lq.repeats.front().beg;
 			#pragma omp parallel for
 			for (int i = 0; i < lt.repeats.size(); i++) {
 				const RepInterval &t = lt.repeats[i];
 				for (int j = 0; j < lq.repeats.size(); j++) {
 					const RepInterval &q = lq.repeats[j];
-					int dis = abs((t.beg - os_t) - (q.beg - os_q)); // Ignore the global offset
-					if (dis < MAX_UNIT_DIS) {
-						matrix[idx_t + i][idx_q + j] = global_alignment(
-							opt, t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
-					}
+					matrix[idx_t + i][idx_q + j] = global_alignment(
+						opt, t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
 				}
 			}
 		}
