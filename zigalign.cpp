@@ -1818,7 +1818,8 @@ void paf_format(const string &q_name, const string &que, const string &t_name, s
 	fprintf(stdout, "cg:Z:%s\n", cigar.c_str());
 }
 
-void extended_paf_format(const string &t_name, int t_len, const string &ext_t, const string &q_name, int q_len, const string ext_q)
+void extended_paf_format(const string &t_name, int t_len, const string &ext_t,
+	const string &q_name, int q_len, const string ext_q, const vector<int> &rid_map)
 {
 	assert(ext_t.length() == ext_q.length());
 	char strand = '+';
@@ -1828,11 +1829,29 @@ void extended_paf_format(const string &t_name, int t_len, const string &ext_t, c
 	string cigar;
 	char op_type = '@';
 	int op_cnt = 0;
+	int t_pointer = 0;
 	for (int i = 0; i < len; i++) {
+		if (ext_t[i] == 'A' or ext_t[i] == 'C' or ext_t[i] == 'G' or ext_t[i] == 'T') {
+			t_pointer++;
+		}
 		if (ext_t[i] == '[' or ext_t[i] == ']') {
 			if (op_type != '@') {
 				cigar += to_string(op_cnt);
 				cigar += op_type;
+			}
+			if (ext_t[i] == '[') {
+				int id = -1;
+				for (int j = 0; j < 20; j++) {
+					if (t_pointer - j >= 0 and rid_map[t_pointer - j] != -1) {
+						id = rid_map[t_pointer - j];
+						break;
+					}
+					if (t_pointer + j < t_len and rid_map[t_pointer + j] != -1) {
+						id = rid_map[t_pointer + j];
+						break;
+					}
+				}
+				if (id != -1) cigar += '(' + to_string(id) + ')';
 			}
 			cigar += ext_t[i];
 			op_type = '@';
@@ -2557,6 +2576,13 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 		agg_q.insert(agg_q.end(), lr.repeats.begin(), lr.repeats.end());
 	}
 
+	vector<int> rep_id_map(t_len + 1, -1);
+	for (const auto &lr :lr_t) {
+		for (const auto &r: lr.repeats) {
+			rep_id_map[r.beg] = lr.pid; // Mark the position one base before the repeat
+		}
+	}
+
 	AlnSta mut; // Small mutations
 	for (const pair<int,int> &p: aln) {
 		int i = p.first, j = p.second;
@@ -2808,7 +2834,7 @@ void align_long_seq(const ZigOptions &opt, const char *fn1, const char *fn2)
 	fprintf(stderr, "\n");
 
 	// Output CIGAR
-	extended_paf_format(name1, t_len, final_ct, name2, q_len, final_cq);
+	extended_paf_format(name1, t_len, final_ct, name2, q_len, final_cq, rep_id_map);
 }
 
 int usage(const ZigOptions &o) {
