@@ -6,6 +6,7 @@
 #include <vector>
 #include <cassert>
 #include <algorithm>
+#include <ctime>
 using namespace std;
 
 const int MIN_UNIT_LEN = 3;

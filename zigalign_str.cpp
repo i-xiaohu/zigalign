@@ -1,0 +1,938 @@
+#include "zigalign.h"
+
+struct RepUnit {
+	int qb, qe; // [qb, qe) is a copy of [tb, te)
+	int match, mis, gap;
+
+	RepUnit() {
+		qb = qe = 0;
+		match = mis = gap = 0;
+	}
+};
+
+struct TandemGroup {
+	int tb, te; // [tb, te) is the template
+	vector<RepUnit> units;
+
+	TandemGroup() {
+		tb = te = 0;
+	}
+};
+
+struct Interval {
+	int l, r; // [l, r)
+};
+
+vector<int> self_alignment2(const ZigOptions &o, uint16_t n, const char *seq, const string &vis_fn = "")
+{
+	vector<vector<Bt1Cell>> bt;
+	self_alignment(o, n, seq, bt);
+	if (not vis_fn.empty()) {
+		ofstream out(vis_fn);
+		assert(out.is_open());
+		int ti = n, tj = n, te = -1;
+		while (ti > 0 and tj > 0) {
+			const Bt1Cell &c = bt[ti][tj];
+			if (c.event != te) {
+				out << ti << "\t" << tj << "\t" << (int)c.event << endl;
+			}
+			ti = (c.pi == 1) ?ti-1 :ti;
+			tj = c.pj;
+			te = c.event;
+		}
+		out << 0 << "\t" << 0 << "\t" << te << endl;
+		out.close();
+	}
+
+	const int NORMAL = 0;
+	const int START_REP = 1;
+	const int NEW_COPY = 2;
+	const int WITHIN_REP = 3;
+	const int END_REP = 4;
+
+	// Trace back the optimal path to find tandem repeats
+	int ti = n, tj = n;
+	vector<TandemGroup> groups;
+	while (ti > 0 and tj > 0) {
+		Bt1Cell &t = bt[ti][tj];
+		if (t.event == END_REP) {
+			assert(ti == tj); // Only main diagonal closes repetitions
+			TandemGroup g;
+			while (t.event != START_REP) {
+				ti = t.pi == 1 ?ti-1 :ti;
+				tj = t.pj;
+				t = bt[ti][tj]; // Lower-right corner of the sub-matrix
+				RepUnit u;
+				u.qe = ti + 1;
+				while (t.event != NEW_COPY and t.event != START_REP) {
+					if (t.pi == 1 and tj == t.pj + 1) {
+						if (seq[ti - 1] == seq[tj - 1]) u.match++;
+						else u.mis++;
+					} else {
+						u.gap++;
+					}
+					ti = t.pi == 1 ?ti-1 :ti;
+					tj = t.pj;
+					t = bt[ti][tj];
+				}
+				// Pointer is now at the upper-left corner
+				u.qb = ti;
+				g.units.push_back(u);
+				if (seq[ti - 1] == seq[tj - 1]) {
+					u.match++;
+				} else {
+					u.mis++;
+				}
+			}
+			g.tb = tj;
+			g.te = ti;
+			reverse(g.units.begin(), g.units.end());
+			groups.push_back(g);
+		}
+		ti = t.pi == 1 ?ti-1 :ti;
+		tj = t.pj;
+	}
+	// It is difficult and inaccurate to directly merge the tandem groups.
+	// An easy way is to break them down to non-overlapping intervals, then merge them based on length and base identity.
+	// But it is more time-consuming if base identity is calculated by DP.
+
+	reverse(groups.begin(), groups.end());
+	for (const TandemGroup &g: groups) {
+		assert(g.units.size() > 0);
+		assert(g.units[0].qb >= g.te);
+		printf("Template: [%d, %d)\n", g.tb, g.te);
+		// Tandem repeats must be stacked
+		for (int i = 1; i < g.units.size(); i++) {
+			assert(g.units[i].qb >= g.units[i-1].qe);
+		}
+		printf("Units: ");
+		int total_match = 0, total_mis = 0, total_gap = 0;
+		for (const RepUnit &u: g.units) {
+			printf(" [%d, %d)", u.qb, u.qe);
+			total_match += u.match;
+			total_mis += u.mis;
+			total_gap += u.gap;
+		}
+		printf("\n");
+		double ave_match = 100.0 * total_match / g.units.size() / (g.te - g.tb);
+		double ave_mis = 1.0 * total_mis / g.units.size();
+		double ave_gap = 1.0 * total_gap / g.units.size();
+		printf("Identity: %.2f %%, ave_mis: %.2f, ave_gap: %.2f\n", ave_match, ave_mis, ave_gap);
+	}
+	for (int i = 1; i < groups.size(); i++) {
+		assert(groups[i].units.back().qe > groups[i-1].units.back().qe);
+	}
+
+	vector<int> ret;
+	if (ret.empty()) return ret;
+	return ret;
+}
+
+struct Dp2Cell {
+	int E, F, B1, B2, H;
+	int pi, pj;
+	Dp2Cell() {
+		E = F = H = B1 = B2 = -INF;
+		pi = pj = -1;
+	}
+};
+
+vector<int> global_pairwise(const ZigOptions &opt,
+	int t_len, const char *t, const vector<int> &t_bp,
+	int q_len, const char *q, const vector<int> &q_bp)
+{
+	// Breakpoints from self-alignment are not optimal in pairwise alignment
+	const int BP_HALF_KMER = 5; // 5 bp before and after the breakpoint, i.e., 11-mer
+	vector<Interval> t_bp_intv;
+	for (int i = 0; i < t_bp.size(); i++) {
+		// If breakpoint kmers overlap with other kmers, then use the breakpoint itself.
+		bool overlapped = false;
+		if (i > 0 and t_bp[i] - BP_HALF_KMER <= t_bp[i-1] + BP_HALF_KMER) overlapped = true;
+		if (i+1 < t_bp.size() and t_bp[i] + BP_HALF_KMER >= t_bp[i+1] - BP_HALF_KMER) overlapped = true;
+		Interval intv;
+		if (not overlapped) {
+			intv.l = max(0, t_bp[i] - BP_HALF_KMER);
+			intv.r = min(t_len, t_bp[i] + BP_HALF_KMER);
+		} else {
+			intv.l = t_bp[i];
+			intv.r = t_bp[i];
+		}
+		t_bp_intv.push_back(intv);
+	}
+	vector<Interval> q_bp_intv;
+	for (int i = 0; i < q_bp.size(); i++) {
+		bool overlapped = false;
+		if (i > 0 and q_bp[i] - BP_HALF_KMER <= q_bp[i-1] + BP_HALF_KMER) overlapped = true;
+		if (i+1 < q_bp.size() and q_bp[i] + BP_HALF_KMER >= q_bp[i+1] - BP_HALF_KMER) overlapped = true;
+		Interval intv;
+		if (not overlapped) {
+			intv.l = max(0, q_bp[i] - BP_HALF_KMER);
+			intv.r = min(q_len, q_bp[i] + BP_HALF_KMER);
+		} else {
+			intv.l = q_bp[i];
+			intv.r = q_bp[i];
+		}
+		q_bp_intv.push_back(intv);
+	}
+
+	// Pairwise alignment
+	const int MAT_SCORE = opt.mat_score;
+	const int MIS_PEN = opt.mis_pen;
+	const int GAP_O = opt.gap_o;
+	const int GAP_E = opt.gap_e;
+	const int DEL_DUP_O = opt.del_dup_o;
+	const int DEL_DUP_E = opt.del_dup_e;
+	vector<vector<Dp2Cell>> dp;
+	dp.resize(t_len + 1);
+	for (int i = 0; i <= t_len; i++) {
+		dp[i].resize(q_len + 1);
+	}
+	dp[0][0].H = 0;
+	for (int j = 1; j <= q_len; j++) {
+		dp[0][j].F = dp[0][j].H = GAP_O + j * GAP_E;
+	}
+	int t_pointer = 0;
+	for (int i = 1; i <= t_len; i++) {
+		dp[i][0].E = dp[i][0].H = GAP_O + i * GAP_E;
+		while (t_pointer < t_bp_intv.size() and t_bp_intv[t_pointer].r < i) t_pointer++;
+		bool in_t_bp = false;
+		if (t_pointer < t_bp_intv.size() and t_bp_intv[t_pointer].l <= i) in_t_bp = true;
+		if (in_t_bp) {
+			assert(t_pointer < t_bp_intv.size() and t_bp_intv[t_pointer].l <= i and t_bp_intv[t_pointer].r >= i);
+			// cout << i << " is in the bp interval " << t_bp_intv[t_pointer].l << " " << t_bp_intv[t_pointer].r << endl;
+			// if (i == t_bp_intv[t_pointer].l) {
+			// 	cout << i << " enter the interval " << t_bp_intv[t_pointer].l << " " << t_bp_intv[t_pointer].r << endl;
+			// }
+			// if (i == t_bp_intv[t_pointer].r) {
+			// 	cout << i << " leave the interval " << t_bp_intv[t_pointer].l << " " << t_bp_intv[t_pointer].r << endl;
+			// }
+		}
+
+		int q_pointer = 0;
+		for (int j = 1; j <= q_len; j++) {
+			int M = dp[i-1][j-1].H + (t[i-1] == q[j-1] ? MAT_SCORE : MIS_PEN);
+			if (M > dp[i][j].H) {
+				dp[i][j].H = M;
+				dp[i][j].pi = i-1;
+				dp[i][j].pj = j-1;
+			}
+			dp[i][j].E = max(dp[i-1][j].H + GAP_O, dp[i-1][j].E) + GAP_E;
+			if (dp[i][j].E > dp[i][j].H) {
+				dp[i][j].H = dp[i][j].E;
+				dp[i][j].pi = i-1;
+				dp[i][j].pj = j;
+			}
+			dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
+			if (dp[i][j].F > dp[i][j].H) {
+				dp[i][j].H = dp[i][j].F;
+				dp[i][j].pi = i;
+				dp[i][j].pj = j-1;
+			}
+
+			while (q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].r < j) q_pointer++;
+			bool in_q_bp = false;
+			if (q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].l <= j) in_q_bp = true;
+			if (in_q_bp) {
+				assert(q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].l <= j and q_bp_intv[q_pointer].r >= j);
+			}
+
+			if (in_t_bp and in_q_bp) {
+				if (q_pointer > 0) {
+					// Jump from the last breakpoint kmer
+					int l1 = q_bp_intv[q_pointer-1].l, r1 = q_bp_intv[q_pointer-1].r;
+					int max_score = -INF, max_id = -1;
+					// Redundant calculation
+					for (int k = l1; k <= r1; k++) {
+						int tmp = max(dp[i][k].H + DEL_DUP_O, dp[i][k].B2) + DEL_DUP_E;
+						if (tmp > max_score) {
+							max_score = tmp;
+							max_id = k;
+						}
+					}
+					dp[i][j].B2 = max_score;
+					if (dp[i][j].B2 > dp[i][j].H) {
+						dp[i][j].H = dp[i][j].B2;
+						dp[i][j].pi = i;
+						dp[i][j].pj = max_id;
+					}
+				}
+				if (t_pointer > 0) {
+					int l1 = t_bp_intv[t_pointer-1].l, r1 = t_bp_intv[t_pointer-1].r;
+					int max_score = -INF, max_id = -1;
+					for (int k = l1; k <= r1; k++) {
+						int tmp = max(dp[k][j].H + DEL_DUP_O, dp[k][j].B1) + DEL_DUP_E;
+						if (tmp > max_score) {
+							max_score = tmp;
+							max_id = k;
+						}
+					}
+					dp[i][j].B1 = max_score;
+					if (dp[i][j].B1 > dp[i][j].H) {
+						dp[i][j].H = dp[i][j].B1;
+						dp[i][j].pi = max_id;
+						dp[i][j].pj = j;
+					}
+				}
+			}
+		}
+	}
+
+	cout << "DIS alignment score: " << dp[t_len][q_len].H << endl;
+
+	// CIGAR generation
+	int ti = t_len, tj = q_len;
+	int del_n = 0, ins_n = 0, mat_n = 0, mis_n = 0, dup_n = 0;
+	string ext_t, ext_q;
+	vector<int> cv;
+	// All operations occur on target sequence _t_
+	const int COP_M = 0;
+	const int COP_I = 1;
+	const int COP_D = 2;
+	const int DUP_I = 3;
+	const int DUP_D = 4;
+	const string OP_CHAR = "MIDID";
+	int op_type = -1, last_op = -1, op_cnt = 0;
+	while (ti > 0 and tj > 0) {
+		const Dp2Cell &p = dp[ti][tj];
+		if (p.pi == ti - 1 and p.pj == tj) { // Deletion from _t_
+			op_type = COP_D;
+			del_n++;
+			ext_t += t[ti-1];
+			ext_q += '-';
+		} else if (p.pi == ti and p.pj == tj - 1) { // Insertion into _t_
+			op_type = COP_I;
+			ins_n++;
+			ext_t += '-';
+			ext_q += q[tj-1];
+		} else if (p.pi == ti - 1 and p.pj == tj - 1) { // Match/Mismatch
+			op_type = COP_M;
+			if (t[ti-1] == q[tj-1]) mat_n++;
+			else mis_n++;
+			ext_t += t[ti-1];
+			ext_q += q[tj-1];
+		} else {
+			if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
+//			fprintf(stderr, "%d %d -> %d %d\n", ti, tj, t.pi, t.pj);
+			if (ti == p.pi) { // Duplication insertion into _t_
+				op_type = DUP_I;
+				op_cnt = tj - p.pj;
+				for (int j = tj; j > p.pj; j--) {
+					ext_t += '+';
+					ext_q += q[j-1];
+				}
+			} else { // Duplication deletion from _t_
+				op_type = DUP_D;
+				op_cnt = ti - p.pi;
+				for (int i = ti; i > p.pi; i--) {
+					ext_t += t[i-1];
+					ext_q += '+';
+				}
+			}
+
+			// TODO: is it necessary to align template unit to copied units?
+			// If so, which unit is the best template?
+			cv.push_back(op_cnt << 4 | op_type); // Do not merge duplication indels
+			dup_n++;
+			op_type = last_op = -1;
+			op_cnt = -1;
+		}
+		// Merge match/mismatch/indels
+		if (last_op != -1 and op_type != last_op) {
+			cv.push_back(op_cnt << 4 | last_op);
+			op_cnt = 0;
+		}
+		last_op = op_type;
+		op_cnt++;
+		ti = p.pi;
+		tj = p.pj;
+	}
+	if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
+	if (ti > 0) {
+		cv.push_back(ti << 4 | COP_D);
+	}
+	if (tj > 0) {
+		cv.push_back(tj << 4 | COP_I);
+	}
+	reverse(cv.begin(), cv.end());
+	reverse(ext_t.begin(), ext_t.end());
+	reverse(ext_q.begin(), ext_q.end());
+	fprintf(stderr, "%d deletions, %d insertions, %d matches, %d mismatches and %d duplication indels\n", del_n, ins_n, mat_n, mis_n, dup_n);
+
+	// Sanity check
+	if (1) {
+		if (DEBUG) {
+			fprintf(stderr, "%s\n", ext_t.data());
+			fprintf(stderr, "%s\n", ext_q.data());
+		}
+		string non_t, non_q;
+		for (char c: ext_t) {
+			if (c != '-' and c != '+') {
+				non_t += c;
+			}
+		}
+		for (char c: ext_q) {
+			if (c != '-' and c != '+') {
+				non_q += c;
+			}
+		}
+		assert(non_t.length() == t_len);
+		assert(non_t == string(t));
+		assert(non_q.length() == q_len);
+		assert(non_q == string(q));
+	}
+
+	if (opt.log_prefix) {
+		string pair_vis_fn = string(opt.log_prefix) + "_p.txt";
+		ofstream out(pair_vis_fn);
+		assert(out.is_open());
+		// Meta information and breakpoints
+		out << "Seq1 length: " << t_len << ", Seq2 length: " << q_len << endl;
+		out << "Breakpoints1:" << endl;
+		for (int i: t_bp) out << i << " ";
+		out << endl;
+		out << "Breakpoints2:" << endl;
+		for (int i: q_bp) out << i << " ";
+		out << endl;
+
+		ti = t_len; tj = q_len;
+		int last_type = -1;
+		const int TYPE_DEL = 0;
+		const int TYPE_INS = 1;
+		const int TYPE_MAT = 2;
+		const int TYPE_DUP = 3;
+		while (ti > 0 and tj > 0) {
+			const Dp2Cell &p = dp[ti][tj];
+			int type;
+			if (p.pi == ti - 1 and p.pj == tj) {
+				type = TYPE_DEL;
+			} else if (p.pi == ti and p.pj == tj - 1) {
+				type = TYPE_INS;
+			} else if (p.pi == ti - 1 and p.pj == tj - 1) {
+				type = TYPE_MAT;
+			} else {
+				type = TYPE_DUP;
+			}
+			// Do not merge tandem duplications
+			if (type != last_type or type == TYPE_DUP) {
+				out << ti << "\t" << tj << "\t" << type << endl;
+			}
+			last_type = type;
+			ti = p.pi;
+			tj = p.pj;
+		}
+		out << ti << "\t" << tj << "\t" << last_type << endl;
+		out.close();
+	}
+	return cv;
+}
+
+struct Dp3Cell {
+	int ci, cj; // Coordinates in DP matrix
+	int E, F, B1, B2, H;
+	int pi, pj; // Traceback in stored matrix
+	Dp3Cell() {
+		E = F = H = B1 = B2 = -INF;
+		pi = pj = -1;
+	}
+};
+
+vector<Interval> merge_intervals(const vector<Interval> &v) {
+	// Input intervals must be l-sorted
+	assert(v.size() > 0);
+	for (int i = 1; i < v.size(); i++) {
+		assert(v[i].l >= v[i-1].l);
+	}
+	vector<Interval> ret;
+	Interval a = v[0];
+	for (int i = 1; i < v.size(); i++) {
+		const Interval &t = v[i];
+		if (t.l > a.r + 1) {
+			ret.push_back(a);
+			a = t;
+		} else {
+			a.r = max(t.r, a.r); // Merge overlapping intervals
+		}
+	}
+	ret.push_back(a);
+	return ret;
+}
+
+vector<int> banded_pairwise(const ZigOptions &opt,
+	int t_len, const char *t, const vector<int> &t_bp,
+	int q_len, const char *q, const vector<int> &q_bp)
+{
+	// Breakpoints from self-alignment are not optimal in pairwise alignment
+	const int BP_HALF_KMER = 5; // 5 bp before and after the breakpoint, i.e., 11-mer
+	vector<Interval> t_bp_intv;
+	for (int i = 0; i < t_bp.size(); i++) {
+		// If breakpoint kmers overlap with other kmers, then use the breakpoint itself.
+		bool overlapped = false;
+		if (i > 0 and t_bp[i] - BP_HALF_KMER <= t_bp[i-1] + BP_HALF_KMER) overlapped = true;
+		if (i+1 < t_bp.size() and t_bp[i] + BP_HALF_KMER >= t_bp[i+1] - BP_HALF_KMER) overlapped = true;
+		Interval intv;
+		if (not overlapped) {
+			intv.l = max(0, t_bp[i] - BP_HALF_KMER);
+			intv.r = min(t_len, t_bp[i] + BP_HALF_KMER);
+		} else {
+			intv.l = t_bp[i];
+			intv.r = t_bp[i];
+		}
+		t_bp_intv.push_back(intv);
+	}
+	vector<Interval> q_bp_intv;
+	for (int i = 0; i < q_bp.size(); i++) {
+		bool overlapped = false;
+		if (i > 0 and q_bp[i] - BP_HALF_KMER <= q_bp[i-1] + BP_HALF_KMER) overlapped = true;
+		if (i+1 < q_bp.size() and q_bp[i] + BP_HALF_KMER >= q_bp[i+1] - BP_HALF_KMER) overlapped = true;
+		Interval intv;
+		if (not overlapped) {
+			intv.l = max(0, q_bp[i] - BP_HALF_KMER);
+			intv.r = min(q_len, q_bp[i] + BP_HALF_KMER);
+		} else {
+			intv.l = q_bp[i];
+			intv.r = q_bp[i];
+		}
+		q_bp_intv.push_back(intv);
+	}
+
+	// Pairwise alignment
+	const int MAT_SCORE = opt.mat_score;
+	const int MIS_PEN = opt.mis_pen;
+	const int GAP_O = opt.gap_o;
+	const int GAP_E = opt.gap_e;
+	const int DEL_DUP_O = opt.del_dup_o;
+	const int DEL_DUP_E = opt.del_dup_e;
+
+	const int bw = opt.band_width; // Bandwidth
+	vector<vector<Dp3Cell>> dp;
+	dp.resize(t_len + 1);
+
+	// The first row
+	// In each row, I obtain the cells that will be calculated
+	vector<Interval> calc_band;
+	Interval cb;
+	cb.l = -bw; // For movement of the band
+	cb.r = bw;
+	calc_band.push_back(cb);
+//	if (t_bp_intv.size() > 0 and t_bp_intv[0].l <= 0 and t_bp_intv[0].r >= 0) {
+//		for (const Interval &v: q_bp_intv) {
+//			cb.l = v.l - bw;
+//			cb.r = v.r + bw;
+//			calc_band.push_back(cb);
+//		}
+//	}
+	calc_band = merge_intervals(calc_band);
+	for (int i = 0; i < calc_band.size(); i++) {
+		const Interval &v = calc_band[i];
+		// printf("[%d, %d]\n", v.l, v.r);
+		int l = max(0, v.l);
+		int r = min(q_len, v.r);
+		for (int j = l; j <= r; j++) {
+			Dp3Cell c;
+			c.ci = 0;
+			c.cj = j;
+			dp[0].push_back(c);
+		}
+	}
+	assert(dp[0][0].ci == 0 and dp[0][0].cj == 0);
+	dp[0][0].H = 0; // Left-top corner of the partial matrix
+	dp[0][0].E = dp[0][0].F = GAP_O; // For convenient calculation
+	for (int j = 1; j < dp[0].size(); j++) {
+		if (dp[0][j].cj == dp[0][j-1].cj + 1 and dp[0][j-1].F != -INF) {
+			dp[0][j].F = dp[0][j].H = dp[0][j-1].F + GAP_E;
+		} // else the previous cell is not stored
+		// FIXME: I should process breakpoints in the first row
+	}
+
+	int t_pointer = 0;
+	for (int i = 1; i <= t_len; i++) {
+		while (t_pointer < t_bp_intv.size() and t_bp_intv[t_pointer].r < i) t_pointer++;
+		bool in_t_bp = (t_pointer < t_bp_intv.size() and t_bp_intv[t_pointer].l <= i);
+
+		// Shift the band
+		for (Interval &v: calc_band) {
+			v.l++;
+			v.r++;
+		}
+		// Add bands of breakpoints
+		if (in_t_bp) {
+			for (const Interval &bp: q_bp_intv) {
+				Interval v{bp.l - bw, bp.r + bw};
+				calc_band.push_back(v);
+			}
+			sort(calc_band.begin(), calc_band.end(), [](const Interval &a, const Interval &b) -> bool { return a.l <= b.l; });
+			calc_band = merge_intervals(calc_band);
+		}
+		for (Interval &v: calc_band) {
+			int l = max(0, v.l);
+			int r = min(q_len, v.r);
+			for (int j = l; j <= r; j++) {
+				Dp3Cell c;
+				c.ci = i;
+				c.cj = j;
+				dp[i].push_back(c);
+			}
+		}
+
+		int mon_j = 0;
+		int q_pointer = 0;
+		for (int j = 0; j < dp[i].size(); j++) {
+			int curr_j = dp[i][j].cj;
+			// Diagonal transfer
+			while (mon_j < dp[i-1].size() and dp[i-1][mon_j].cj < curr_j-1) mon_j++;
+			if (mon_j < dp[i-1].size() and dp[i-1][mon_j].cj == curr_j-1) {
+				int M = dp[i-1][mon_j].H + (t[i-1] == q[curr_j-1] ? MAT_SCORE : MIS_PEN);
+				if (M > dp[i][j].H) {
+					dp[i][j].H = M;
+					dp[i][j].pi = i-1;
+					dp[i][j].pj = mon_j;
+				}
+			}
+
+			// Vertical transfer
+			while (mon_j < dp[i-1].size() and dp[i-1][mon_j].cj < curr_j) mon_j++;
+			if (mon_j < dp[i-1].size() and dp[i-1][mon_j].cj == curr_j) {
+				dp[i][j].E = max(dp[i-1][mon_j].H + GAP_O, dp[i-1][mon_j].E) + GAP_E;
+				if (dp[i][j].E > dp[i][j].H) {
+					dp[i][j].H = dp[i][j].E;
+					dp[i][j].pi = i-1;
+					dp[i][j].pj = mon_j;
+				}
+			}
+
+			// Horizontal transfer
+			if (j > 0 and curr_j == dp[i][j-1].cj + 1) {
+				dp[i][j].F = max(dp[i][j-1].H + GAP_O, dp[i][j-1].F) + GAP_E;
+				if (dp[i][j].F > dp[i][j].H) {
+					dp[i][j].H = dp[i][j].F;
+					dp[i][j].pi = i;
+					dp[i][j].pj = j-1;
+				}
+			}
+
+			while (q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].r < curr_j) q_pointer++;
+			bool in_q_bp = (q_pointer < q_bp_intv.size() and q_bp_intv[q_pointer].l <= curr_j);
+			if (in_t_bp and in_q_bp) {
+				// TODO: remove the redundant calculation
+				if (q_pointer > 0) {
+					// Jump from the last breakpoint kmer
+					int l1 = q_bp_intv[q_pointer-1].l, r1 = q_bp_intv[q_pointer-1].r;
+					int max_score = -INF, max_id = -1;
+					assert(j > 0);
+					int low = 0, high = j-1, ans = -1;
+					while (low <= high) {
+						int mid = (low + high) >> 1;
+						if (dp[i][mid].cj >= l1) {
+							ans = mid;
+							high = mid - 1;
+						} else {
+							low = mid + 1;
+						}
+					}
+					assert(ans != -1);
+					if (ans != -1) {
+						assert(dp[i][ans].cj == l1);
+						for (int k = ans; k < j; k++) {
+							if (dp[i][k].cj > r1) break;
+							assert(dp[i][k].cj >= l1 and dp[i][k].cj <= r1);
+							int tmp = max(dp[i][k].H + DEL_DUP_O, dp[i][k].B2) + DEL_DUP_E;
+							if (tmp > max_score) {
+								max_score = tmp;
+								max_id = k;
+							}
+						}
+						dp[i][j].B2 = max_score;
+						if (dp[i][j].B2 > dp[i][j].H) {
+							dp[i][j].H = dp[i][j].B2;
+							dp[i][j].pi = i;
+							dp[i][j].pj = max_id;
+						}
+					}
+				}
+
+				if (t_pointer > 0) {
+					int l1 = t_bp_intv[t_pointer-1].l, r1 = t_bp_intv[t_pointer-1].r;
+					int max_score = -INF, max_id = -1, mate_id;
+					for (int k = l1; k <= r1; k++) {
+						int low = 0, high = dp[k].size()-1, ans = -1;
+						while (low <= high) {
+							int mid = (low + high) >> 1;
+							if (dp[k][mid].cj > curr_j) {
+								high = mid - 1;
+							} else if (dp[k][mid].cj < curr_j) {
+								low = mid + 1;
+							} else {
+								ans = mid;
+								break;
+							}
+						}
+						assert(ans != -1);
+						if (ans != -1) {
+							int tmp = max(dp[k][ans].H + DEL_DUP_O, dp[k][ans].B1) + DEL_DUP_E;
+							if (tmp > max_score) {
+								max_score = tmp;
+								max_id = k;
+								mate_id = ans;
+							}
+						}
+					}
+					dp[i][j].B1 = max_score;
+					if (dp[i][j].B1 > dp[i][j].H) {
+						dp[i][j].H = dp[i][j].B1;
+						dp[i][j].pi = max_id;
+						dp[i][j].pj = mate_id;
+					}
+				}
+			}
+		}
+	}
+	long raw_size = (long)(t_len + 1) * (q_len + 1);
+	long part_size = 0;
+	for (int i = 0; i <= t_len; i++) {
+		part_size += dp[i].size();
+	}
+	cout << "DSI alignment score: " << dp[t_len].back().H << endl;
+	cout << "Band size: " << bw << endl;
+	cout << "Calculation rate [%]: " << 100.0 * part_size / raw_size << endl;
+
+	// CIGAR generation
+	int ti = t_len, tj = dp[t_len].size()-1;
+	int ci = dp[ti][tj].ci, cj = dp[ti][tj].cj;
+	assert(ci == t_len and cj == q_len);
+	int del_n = 0, ins_n = 0, mat_n = 0, mis_n = 0, dup_n = 0;
+	vector<int> cv;
+	// All operations occur on target sequence _t_
+	const int COP_M = 0;
+	const int COP_I = 1;
+	const int COP_D = 2;
+	const int DUP_I = 3;
+	const int DUP_D = 4;
+	const string OP_CHAR = "MIDID";
+	int op_type = -1, last_op = -1, op_cnt = 0;
+	string ext_t, ext_q;
+	while (ti > 0 and tj > 0) {
+		const Dp3Cell &p = dp[ti][tj];
+		assert(p.pi != -1 and p.pj != -1);
+		const Dp3Cell &g = dp[p.pi][p.pj];
+		int pi = g.ci, pj = g.cj;
+		if (pi == ci - 1 and pj == cj) { // Deletion from _t_
+			op_type = COP_D;
+			del_n++;
+			ext_t += t[ci-1];
+			ext_q += '-';
+		} else if (pi == ci and pj == cj - 1) { // Insertion into _t_
+			op_type = COP_I;
+			ins_n++;
+			ext_t += '-';
+			ext_q += q[cj-1];
+		} else if (pi == ci - 1 and pj == cj - 1) { // Match/Mismatch
+			op_type = COP_M;
+			if (t[ci-1] == q[cj-1]) mat_n++;
+			else mis_n++;
+			ext_t += t[ci-1];
+			ext_q += q[cj-1];
+		} else {
+			if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
+//			fprintf(stderr, "%d %d -> %d %d\n", ti, tj, t.pi, t.pj);
+			if (ci == pi) { // Duplication insertion into _t_
+				op_type = DUP_I;
+				op_cnt = cj - pj;
+				for (int j = cj; j > pj; j--) {
+					ext_t += '+';
+					ext_q += q[j-1];
+				}
+			} else { // Duplication deletion from _t_
+				op_type = DUP_D;
+				op_cnt = ci - pi;
+				for (int i = ci; i > pi; i--) {
+					ext_t += t[i-1];
+					ext_q += '+';
+				}
+			}
+
+			cv.push_back(op_cnt << 4 | op_type); // Do not merge duplication indels
+			dup_n++;
+			op_type = last_op = -1;
+			op_cnt = -1;
+		}
+		// Merge match/mismatch/indels
+		if (last_op != -1 and op_type != last_op) {
+			cv.push_back(op_cnt << 4 | last_op);
+			op_cnt = 0;
+		}
+		last_op = op_type;
+		op_cnt++;
+		ti = p.pi;
+		tj = p.pj;
+		ci = g.ci;
+		cj = g.cj;
+	}
+	if (last_op != -1) cv.push_back(op_cnt << 4 | last_op);
+	// cout << ti << "\t" << tj << endl;
+	if (ti > 0) {
+		cv.push_back(ci << 4 | COP_D);
+	}
+	if (tj > 0) {
+		cv.push_back(cj << 4 | COP_I);
+	}
+	reverse(cv.begin(), cv.end());
+	reverse(ext_t.begin(), ext_t.end());
+	reverse(ext_q.begin(), ext_q.end());
+	fprintf(stderr, "%d deletions, %d insertions, %d matches, %d mismatches and %d duplication indels\n", del_n, ins_n, mat_n, mis_n, dup_n);
+
+	if (1) {
+		if (DEBUG) {
+			fprintf(stderr, "%s\n", ext_t.data());
+			fprintf(stderr, "%s\n", ext_q.data());
+		}
+		string non_t, non_q;
+		for (char c: ext_t) {
+			if (c != '-' and c != '+') {
+				non_t += c;
+			}
+		}
+		for (char c: ext_q) {
+			if (c != '-' and c != '+') {
+				non_q += c;
+			}
+		}
+		assert(non_t.length() == t_len);
+		assert(non_t == string(t));
+		assert(non_q.length() == q_len);
+		assert(non_q == string(q));
+	}
+	return cv;
+}
+
+// FIXME: the stitching is inaccurate
+vector<int> process_long(const ZigOptions &opt, int n, const char *seq) {
+	// NOTE: I got different results from n = 20000; n might affect the accuracy of breakpoints
+	// NOTE: serial execution because of cyclic repeats
+	const int part_len = 40000;
+
+	vector<int> all_bps;
+	all_bps.push_back(0);
+	int offset = 0;
+	int cnt = 0;
+	while (offset < n) {
+		int len = min(n - offset, part_len);
+		fprintf(stderr, "cnt=%d, offset=%d, length=%d\n", cnt+1, offset, len);
+		string vis_fn = "pairwise/hors/hor_b" + to_string(++cnt) + ".txt";
+		vector<int> bps = self_alignment2(opt, len, seq + offset, vis_fn);
+		for (int i = 1; i < bps.size(); i++) {
+			all_bps.push_back(bps[i] + offset);
+		}
+
+		// Continue from the penultimate breakpoints
+		if (bps.size() > 2) {
+			offset += bps[bps.size() - 2] + 1;
+		} else {
+			offset += len;
+		}
+	}
+	fprintf(stderr, "Stitched %ld breakpoints\n", all_bps.size());
+	return all_bps;
+}
+
+void paf_format(const string &q_name, const string &que, const string &t_name, string tar, const vector<int> &cv)
+{
+	const int COP_M = 0;
+	const int COP_I = 1;
+	const int COP_D = 2;
+	const int DUP_I = 3;
+	const int DUP_D = 4;
+	const string OP_CHAR = "MIDID";
+
+	int q_len = que.length(), t_len = tar.length();
+	char strand = '+';
+	int matches_n = 0, mismatches_n = 0, extended_length = 0;
+	int mapq = 60;
+	int edit_distance = 0;
+	int ti = 0, qi = 0;
+	string cigar;
+	for (int x : cv) {
+		int op_type = x & 15, op_cnt = x >> 4;
+		if (op_type == COP_M) {
+			for (int i = 0; i < op_cnt; i++) {
+				if (que[qi + i] == tar[ti + i]) {
+					matches_n++;
+				} else {
+					mismatches_n++;
+					edit_distance++;
+				}
+			}
+			ti += op_cnt;
+			qi += op_cnt;
+		} else if (op_type == COP_I) {
+			qi += op_cnt;
+			edit_distance += op_cnt;
+		} else if (op_type == DUP_I) {
+			qi += op_cnt;
+			edit_distance += 1; // Tandem duplication has an edit distance of 1
+		} else if (op_type == COP_D) {
+			ti += op_cnt;
+			edit_distance += op_cnt;
+		} else {
+			ti += op_cnt;
+			edit_distance += 1; // Tandem deletion has an edit distance of 1
+		}
+		extended_length += op_cnt;
+		// TODO: identify matches between units
+		if (op_type == DUP_D or op_type == DUP_I) cigar += 'U';
+		cigar += to_string(op_cnt);
+		cigar += OP_CHAR[op_type];
+	}
+	assert(ti == t_len and qi == q_len);
+
+	// CIGAR validation
+	if (DEBUG) {
+		string modified_tar;
+		qi = 0;
+		for (int x : cv) {
+			int op_type = x & 15, op_cnt = x >> 4;
+			if (op_type == COP_M) {
+				for (int i = 0; i < op_cnt; i++) {
+					modified_tar += que[qi++];
+				}
+			} else if (op_type == COP_I or op_type == DUP_I) {
+				for (int i = 0; i < op_cnt; i++) {
+					modified_tar += que[qi++];
+				}
+			}
+		}
+		assert(modified_tar == que);
+	}
+	fprintf(stdout, "%s\t%d\t%d\t%d\t%c\t", q_name.c_str(), q_len, 0, q_len, strand);
+	fprintf(stdout, "%s\t%d\t%d\t%d\t", t_name.c_str(), t_len, 0, t_len);
+	fprintf(stdout, "%d\t%d\t%d\t", matches_n+mismatches_n, extended_length, mapq);
+	fprintf(stdout, "NM:i:%d\t", edit_distance);
+	fprintf(stdout, "cg:Z:%s\n", cigar.c_str());
+}
+
+void align_str(const ZigOptions &opt, const char *fn_t, const char *fn_q) {
+	FastaSeq target = input_fasta_seq(fn_t);
+	FastaSeq query = input_fasta_seq(fn_q);
+	const string &name_t = target.name, &name_q = query.name;
+	const string &seq_t = target.seq, &seq_q = query.seq;
+	int t_len = seq_t.length(), q_len = seq_q.length();
+	const char *t = seq_t.data(), *q = seq_q.data();
+
+	if (t_len > SA_MAX_LEN or q_len > SA_MAX_LEN) {
+		vector<int> t_bp = (t_len > SA_MAX_LEN) ?process_long(opt, t_len, t) :self_alignment2(opt, t_len, t, "");
+		vector<int> q_bp = (q_len > SA_MAX_LEN) ?process_long(opt, q_len, q) :self_alignment2(opt, q_len, q, "");
+		// It is slow because the partial matrix is still large
+		vector<int> cv2 = banded_pairwise(opt, t_len, t, t_bp, q_len, q, q_bp);
+		paf_format(name_q, seq_q, name_t, seq_t, cv2);
+	} else {
+		// banded_pairwise(opt, t_len, t, q_len, q);
+		string t_vis_fn = "", q_vis_fn = "";
+		if (opt.log_prefix) {
+			t_vis_fn = string(opt.log_prefix) + "_s1.txt";
+			q_vis_fn = string(opt.log_prefix) + "_s2.txt";
+		}
+		vector<int> t_bp = self_alignment2(opt, t_len, t, t_vis_fn);
+		vector<int> q_bp = self_alignment2(opt, q_len, q, q_vis_fn);
+		vector<int> cv2 = banded_pairwise(opt, t_len, t, t_bp, q_len, q, q_bp);
+		paf_format(name_q, seq_q, name_t, seq_t, cv2);
+	}
+}
