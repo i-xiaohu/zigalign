@@ -1,22 +1,27 @@
-#include "zigalign.h"
+#include <cmath>
+#include <memory>
 
-vector<RepInterval> self_alignment(const ZigOptions &o, int n, const char *seq, vector<vector<Bt1Cell>> &bt)
+#include "zigalign.h"
+#include "wraparound.h"
+
+vector<RepInterval> self_alignment(const ZigOptions &opt, int n, const char *seq, vector<vector<Bt1Cell>> &bt)
 {
 	if (n > SA_MAX_LEN) {
 		fprintf(stderr, "Sequence length %d exceeds the limit of self alignment %d\n", n, SA_MAX_LEN);
 		abort();
 	}
 
-	const int MIN_UNIT = o.min_unit_size;
-	const int MAT_SCORE = o.mat_score;
-	const int OPEN_TR = o.open_tr_pen;
-	const int CLOSE_TR = o.close_tr_pen;
-	const int SA_MAT_SCORE = o.sa_mat_score;
-	const int SA_MIS_PEN = o.sa_mis_pen;
-	const int SA_GAP_O = o.sa_gap_o;
-	const int SA_GAP_E = o.sa_gap_e;
+	const int MIN_UNIT = opt.min_unit_size;
+	const int MAX_UNIT = opt.max_unit_size;
+	const int MAT_SCORE = 0;
+	const int OPEN_TR = opt.open_tr_pen;
+	const int CLOSE_TR = opt.close_tr_pen;
+	const int SA_MAT_SCORE = opt.self_aln.mat;
+	const int SA_MIS_PEN = opt.self_aln.mis;
+	const int SA_GAP_O = opt.self_aln.gap_o;
+	const int SA_GAP_E = opt.self_aln.gap_e;
 
-	const int BT_NORMAL = 0;
+	const int BT_NON_REP = 0;
 	const int BT_START_REP = 1;
 	const int BT_NEW_COPY = 2;
 	const int BT_WITHIN_REP = 3;
@@ -27,15 +32,8 @@ vector<RepInterval> self_alignment(const ZigOptions &o, int n, const char *seq, 
 	}
 
 	if (n < MIN_UNIT) {
-		bt.resize(n + 1);
-		for (int i = 0; i <= n; i++) {
-			bt[i].resize(i + 1);
-			if (i > 0) {
-				bt[i][i].event = BT_NORMAL;
-				bt[i][i].pi = 1;
-				bt[i][i].pj = i-1;
-			}
-		}
+		vector<RepInterval> ret;
+		return ret;
 	}
 
 	// Memory allocation
@@ -50,7 +48,7 @@ vector<RepInterval> self_alignment(const ZigOptions &o, int n, const char *seq, 
 	prev_dp[0].H = 0;
 	prev_dp[0].beg = 1;
 	for (int i = 1; i <= MIN_UNIT; i++) {
-		bt[i][i].event = BT_NORMAL;
+		bt[i][i].event = BT_NON_REP;
 		bt[i][i].pi = 1;
 		bt[i][i].pj = i-1;
 	}
@@ -61,7 +59,7 @@ vector<RepInterval> self_alignment(const ZigOptions &o, int n, const char *seq, 
 	for (int i = MIN_UNIT + 1; i <= n; i++) {
 		for (int j = 0; j <= i; j++) curr_dp[j] = Dp1Cell();
 		curr_dp[i].H = prev_dp[i-1].H + MAT_SCORE;
-		bt[i][i].event = BT_NORMAL;
+		bt[i][i].event = BT_NON_REP;
 		bt[i][i].pi = 1;
 		bt[i][i].pj = i-1;
 		curr_dp[i].beg = prev_dp[i-1].beg;
@@ -540,14 +538,215 @@ RepInterval pickout_pattern(const vector<RepInterval> &reps) {
 	return ret;
 }
 
-struct LongRepeats {
+struct TandemRepeats {
 	int pid; // Pattern ID
 	int base_idx; // Base index
 	string pattern;
+	double ave_len;
+	double ave_mis;
+	double ave_gap;
 	vector<RepInterval> repeats;
 };
 
-vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const char *seq)
+vector<TandemRepeats> group_repeats(const vector<RepInterval> &reps)
+{
+	vector<TandemRepeats> ret;
+	if (reps.empty()) return ret;
+
+	TandemRepeats tr;
+	tr.ave_len = reps[0].end - reps[0].beg;
+	tr.ave_mis = tr.ave_gap = 0;
+	tr.repeats.push_back(reps[0]);
+	for (int i = 1; i < reps.size(); i++) {
+		const RepInterval &r = reps[i];
+		if (r.mat == -1) { // New group
+			tr.ave_len /= tr.repeats.size();
+			tr.ave_mis /= (tr.repeats.size() - 1);
+			tr.ave_gap /= (tr.repeats.size() - 1);
+			ret.push_back(tr);
+			tr.ave_len = r.end - r.beg;
+			tr.ave_mis = tr.ave_gap = 0;
+			tr.repeats.push_back(r);
+		} else {
+			tr.ave_len += r.end - r.beg;
+			tr.ave_gap += r.gap;
+			tr.ave_mis += r.mis;
+			tr.repeats.push_back(r);
+		}
+	}
+	tr.ave_len /= tr.repeats.size();
+	tr.ave_mis /= (tr.repeats.size() - 1);
+	tr.ave_gap /= (tr.repeats.size() - 1);
+	ret.push_back(tr);
+	return ret;
+}
+
+void print_repeats(const vector<RepInterval> &reps)
+{
+	fprintf(stderr, "Collect %ld repeats\n", reps.size());
+	for (const RepInterval &r: reps) {
+		fprintf(stderr, "[%d, %d) len=%d, mat=%d, mis=%d, gap=%d\n",
+			r.beg, r.end, r.end - r.beg, r.mat, r.mis, r.gap);
+	}
+	fprintf(stderr, "\n");
+}
+
+vector<TandemRepeats> collect_long_repeats2(const ZigOptions &opt, int n, const char *seq)
+{
+	int n_threads = opt.n_threads;
+	vector<vector<Bt1Cell>> bt_bin[n_threads];
+	vector<RepInterval> reps_bin[n_threads];
+	vector<TandemRepeats> tr_bin[n_threads];
+	vector<TandemRepeats> ret;
+	int global_os = 0;
+	int batch_id = 0;
+	while (global_os < n) {
+		double r_start = realtime(), c_start = cputime();
+		int m = n - global_os;
+		const char *s0 = seq + global_os;
+
+		// Multi-threading DP
+		#pragma omp parallel for
+		for (int i = 0; i < n_threads; i++) {
+			int beg = i * SA_PART_LEN;
+			int end = min(m, beg + SA_PART_LEN);
+			if (beg >= end) {
+				reps_bin[i].clear();
+				tr_bin[i].clear();
+			} else {
+				const char *s = s0 + beg;
+				vector<RepInterval> curr_reps, next_reps;
+				curr_reps = self_alignment(opt, end - beg, s, bt_bin[i]);
+				reps_bin[i].clear();
+				while (not curr_reps.empty()) {
+					next_reps.clear();
+					for (const RepInterval &r: curr_reps) {
+						// fprintf(stderr, "Break down [%d, %d) len=%d\n", r.beg, r.end, r.end - r.beg);
+						vector<RepInterval> tmp = self_alignment(opt, r.end - r.beg, s + r.beg, bt_bin[i]);
+						if (tmp.empty()) {
+							// Non-nested
+							reps_bin[i].push_back(r);
+						} else {
+							// Recursively break down the nested repeat
+							for (RepInterval &t: tmp) {
+								t.beg += r.beg;
+								t.end += r.beg;
+								next_reps.push_back(t);
+							}
+						}
+						// print_repeats(tmp);
+					}
+					swap(curr_reps, next_reps);
+				}
+				sort(reps_bin[i].begin(), reps_bin[i].end());
+				// Remove the last unit because it might be incomplete
+				if (not reps_bin[i].empty()) {
+					reps_bin[i].resize(reps_bin[i].size() - 1);
+				}
+				for (RepInterval &r: reps_bin[i]) {
+					r.beg += global_os + beg;
+					r.end += global_os + beg;
+				}
+				tr_bin[i] = group_repeats(reps_bin[i]);
+			}
+		}
+		double c_time = cputime() - c_start, r_time = realtime() - r_start;
+		int n_reps = 0;
+		for (int i = 0; i < n_threads; i++) {
+			n_reps += reps_bin[i].size();
+		}
+		fprintf(stderr, "Batch %d, offset: %d, reps: %d; CPU: %.2f, Wall: %.2f, Core: %.2f\n",
+			++batch_id, global_os, n_reps, c_time, r_time, c_time / r_time);
+
+		if (0) {
+			for (int i = 0; i < n_threads; i++) {
+				fprintf(stdout, "thread %d\n", i);
+				for (const TandemRepeats &g: tr_bin[i]) {
+					fprintf(stdout, "ave len=%.2f, mis=%.2f, gap=%.2f, range=[%d,%d)\n",
+						g.ave_len, g.ave_mis, g.ave_gap, g.repeats.front().beg, g.repeats.back().end);
+					// for (const RepInterval &r: g.repeats) {
+					// 	fprintf(stdout, "[%d, %d) len=%d, mat=%d, mis=%d, gap=%d\n",
+					// 		r.beg, r.end, r.end - r.beg, r.mat, r.mis, r.gap);
+					// }
+					// fprintf(stdout, "\n");
+				}
+			}
+		}
+
+		// Bridge adjacent batches
+		const double MAX_TR_DIV = 0.4;
+		const int MAX_COMPARE = 300;
+		for (int i = 0; i < n_threads; i++) {
+			for (const TandemRepeats &g: tr_bin[i]) {
+				if (ret.empty()) {
+					ret.push_back(g);
+				} else {
+					TandemRepeats &t = ret.back();
+					double len_diff = abs(g.ave_len - t.ave_len) / t.ave_len;
+					bool to_merge = false;
+					if (len_diff < MAX_TR_DIV) {
+						// U + U
+						const RepInterval &b = g.repeats.front();
+						int len_b = b.end - b.beg;
+						string sb;
+						sb.resize(len_b);
+						memcpy((char*) sb.data(), seq + b.beg, len_b);
+						sb += sb;
+						// use average divergence to reduce disturbs of outliers
+						int n_comp = 0;
+						double ave_div = 0;
+						for (const RepInterval &a: t.repeats) {
+							int len_a = a.end - a.beg;
+							double len_div = 1.0 * abs(len_b - len_a) / min(len_b, len_a);
+							if (len_div > MAX_TR_DIV) continue;
+							// Use semi-global alignment to handle repeat rotations
+							SgResult sg = semi_global(len_a, seq + a.beg, sb.length(), sb.data());
+							n_comp++;
+							ave_div += 1.0 * (sg.mis + sg.gap) / len_a;
+							if (n_comp > MAX_COMPARE) break;
+						}
+						ave_div /= n_comp;
+						if (ave_div < MAX_TR_DIV) {
+							to_merge = true;
+						}
+						// fprintf(stderr, "ave_div = %.2f, merge = %d\n", ave_div, to_merge);
+					}
+					if (to_merge) {
+						t.repeats.insert(t.repeats.end(), g.repeats.begin(), g.repeats.end());
+					} else {
+						ret.push_back(g);
+					}
+				}
+			}
+		}
+		global_os += n_threads * SA_PART_LEN;
+	}
+
+	for (int i = 0; i < ret.size();i ++) {
+		TandemRepeats &tr = ret[i];
+		// Recalculate meta information for the merged tandem repeats
+		tr.ave_len = tr.ave_gap = tr.ave_mis = 0;
+		int n_reps = 0;
+		for (const RepInterval &r: tr.repeats) {
+			tr.ave_len += r.end - r.beg;
+			if (r.mis != -1) {
+				n_reps++;
+				tr.ave_gap += r.gap;
+				tr.ave_mis += r.mis;
+			}
+		}
+		tr.ave_len /= tr.repeats.size();
+		if (n_reps) tr.ave_mis /= n_reps;
+		if (n_reps) tr.ave_gap /= n_reps;
+		fprintf(stderr, "TR Group %d, reps=%ld, len=%.2f, mis=%.2f, gap=%.2f, range=[%d,%d)\n",
+			i + 1, tr.repeats.size(), tr.ave_len, tr.ave_mis, tr.ave_gap, tr.repeats.front().beg, tr.repeats.back().end);
+	}
+	exit(1);
+
+	return ret;
+}
+
+vector<TandemRepeats> collect_long_repeats(const ZigOptions &opt, int n, const char *seq)
 {
 	assert(opt.n_threads > 0);
 	int global_os = 0;
@@ -555,7 +754,7 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 	vector<vector<Bt1Cell>> bt_mat;
 	string pattern;
 	vector<RepInterval> all_reps;
-	vector<LongRepeats> ret;
+	vector<TandemRepeats> ret;
 
 	// TODO: use thread pipeline to achieve better parallelization
 	int batch_id = 0;
@@ -565,7 +764,7 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		const char *s0 = seq + global_os;
 		if (pattern.empty()) {
 			// Discover repeat pattern
-			int k = min(PART_LEN, m);
+			int k = min(SA_PART_LEN, m);
 			vector<RepInterval> pool = self_alignment(opt, k, s0, bt_mat); // Multiple pattern?
 			vector<RepInterval> reps;
 			// Unwind nested repeats recursively to discover as short units as possible
@@ -605,12 +804,12 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		}
 
 		// Multi-threaded WDP
-		int n_threads = min((m + PART_LEN - 1) / PART_LEN, opt.n_threads);
+		int n_threads = min((m + SA_PART_LEN - 1) / SA_PART_LEN, opt.n_threads);
 		#pragma omp parallel for num_threads(n_threads)
 		for (int i = 0; i < n_threads; i++) {
 			reps_bin[i].clear();
-			int os = i * PART_LEN;
-			int t_len = min(m - os, PART_LEN);
+			int os = i * SA_PART_LEN;
+			int t_len = min(m - os, SA_PART_LEN);
 			// fprintf(stderr, "thread %d, len = %d\n", i + 1, t_len);
 			const char *s = s0 + os;
 			reps_bin[i] = extend_pattern(pattern.length(), pattern.data(), t_len, s);
@@ -702,7 +901,7 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		// End position of the current repeat pattern
 		global_os = all_reps.back().end;
 		if (not poor_range.empty()) {
-			LongRepeats lr;
+			TandemRepeats lr;
 			lr.pattern = pattern;
 			lr.repeats = all_reps;
 			ret.push_back(lr);
@@ -713,7 +912,7 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 		// TODO: post-process the poorly aligned regions
 	}
 	if (not pattern.empty()) {
-		LongRepeats lr;
+		TandemRepeats lr;
 		lr.pattern = pattern;
 		lr.repeats = all_reps;
 		ret.push_back(lr);
@@ -721,7 +920,7 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 
 	fprintf(stderr, "Found %ld patterns\n", ret.size());
 	for (int i = 0; i < ret.size(); i++) {
-		const LongRepeats &r = ret[i];
+		const TandemRepeats &r = ret[i];
 		const string &s = r.pattern;
 		int beg = r.repeats.front().beg;
 		int end = r.repeats.back().end;
@@ -731,7 +930,7 @@ vector<LongRepeats> collect_long_repeats(const ZigOptions &opt, int n, const cha
 	return ret;
 }
 
-LongRepeats normalize_repeats(const ZigOptions &opt, int pat_len, const char *pat_seq, int n, const char *seq)
+TandemRepeats normalize_repeats(const ZigOptions &opt, int pat_len, const char *pat_seq, int n, const char *seq)
 {
 	assert(opt.n_threads > 0);
 	int n_threads = opt.n_threads;
@@ -752,8 +951,8 @@ LongRepeats normalize_repeats(const ZigOptions &opt, int pat_len, const char *pa
 		#pragma omp parallel for
 		for (int i = 0; i < n_threads; i++) {
 			reps_bin[i].clear();
-			int os = i * PART_LEN;
-			int t_len = min(m - os, PART_LEN);
+			int os = i * SA_PART_LEN;
+			int t_len = min(m - os, SA_PART_LEN);
 			if (t_len <= 0) continue;
 			const char *s = s0 + os;
 			reps_bin[i] = extend_pattern(pat_len, pat_seq, t_len, s);
@@ -794,148 +993,9 @@ LongRepeats normalize_repeats(const ZigOptions &opt, int pat_len, const char *pa
 		// Find the end position of the repeat pattern
 		global_os = all_reps.back().end;
 	}
-	LongRepeats ret;
+	TandemRepeats ret;
 	ret.pattern = rep_pat;
 	ret.repeats = all_reps;
-	return ret;
-}
-
-struct LocalResult {
-	int max_score;
-	int beg_a, end_a;
-	int beg_b, end_b;
-};
-
-// Use SIMD or other methods to accelerate it (banded alignment generates poor results)
-LocalResult local_alignment(const int n, const char *a, const int m, const char *b)
-{
-	// Classical SI score matrix
-	const int MAT_S = 1;
-	const int MIS_P = -4;
-	const int GAP_O = -6;
-	const int GAP_E = -1;
-
-	const int STOP = 0;
-	const int VERTICAL = 1;
-	const int HORIZONTAL = 2;
-	const int DIAGONAL = 3;
-
-	vector<int> prev_H(m + 1, 0), curr_H(m + 1, 0);
-	vector<int> prev_E(m + 1, 0), curr_E(m + 1, 0);
-	vector<vector<uint8_t>> bt(n + 1);
-	for (int i = 0; i <= n; i++) bt[i].resize(m + 1, STOP);
-	int max_score = -1;
-	int end_i = 0, end_j = 0;
-
-	for (int i = 1; i <= n; i++) {
-		int F = 0;
-		memset(curr_H.data(), 0, (m + 1) * sizeof(int));
-		for (int j = 1; j <= m; j++) {
-			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
-			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
-			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
-			if (F > curr_H[j]) {
-				curr_H[j] = F;
-				bt[i][j] = HORIZONTAL;
-			}
-			if (curr_E[j] > curr_H[j]) {
-				curr_H[j] = curr_E[j];
-				bt[i][j] = VERTICAL;
-			}
-			if (M > curr_H[j]) {
-				curr_H[j] = M;
-				bt[i][j] = DIAGONAL;
-			}
-			if (curr_H[j] > max_score) {
-				max_score = curr_H[j];
-				end_i = i;
-				end_j = j;
-			}
-		}
-		swap(prev_H, curr_H);
-		swap(prev_E, curr_E);
-	}
-
-	int pi = end_i, pj = end_j;
-	string ext_a, ext_b, align;
-	while (bt[pi][pj] != STOP) {
-		switch (bt[pi][pj]) {
-		case DIAGONAL:
-			ext_a += a[--pi];
-			ext_b += b[--pj];
-			align += (a[pi] == b[pj] ?' ' :'X');
-			break;
-		case VERTICAL:
-			ext_a += a[--pi];
-			ext_b += '-';
-			align += ' ';
-			break;
-		case HORIZONTAL:
-			ext_a += ' ';
-			ext_b += b[--pj];
-			align += ' ';
-			break;
-		default:
-			break;
-		}
-	}
-	reverse(ext_a.begin(), ext_a.end());
-	reverse(ext_b.begin(), ext_b.end());
-	reverse(align.begin(), align.end());
-
-	// cout << ext_a << endl;
-	// cout << align << endl;
-	// cout << ext_b << endl;
-	// printf("[%d, %d) aligns with [%d, %d), max_score=%d\n", pi, end_i, pj, end_j, max_score);
-
-	LocalResult ret;
-	ret.max_score = max_score;
-	ret.beg_a = pi;
-	ret.end_a = end_i;
-	ret.beg_b = pj;
-	ret.end_b = end_j;
-	return ret;
-}
-
-int global_alignment(const ZigOptions &opt, const int n, const char *a, const int m, const char *b)
-{
-	const int UNIT_MAT_S = opt.mat_score;
-	const int UNIT_MIS_P = opt.mis_pen;
-	const int UNIT_GAP_O = opt.gap_o;
-	const int UNIT_GAP_E = opt.gap_e;
-	const double GAP_RATIO = 0.01;
-	int w = min(n, m) * GAP_RATIO;
-
-	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
-	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
-	prev_H[0] = 0;
-	for (int i = 1; i <= m; i++) {
-		prev_H[i] = prev_E[i] = UNIT_GAP_O + i * UNIT_GAP_E;
-	}
-
-	int ret = -INF;
-	for (int i = 1; i <= n; i++) {
-		int beg = max(i - w, 1), end = min(i + w, m);
-		if (beg > end) break;
-		if (beg == 1) curr_H[beg-1] = UNIT_GAP_O + i * UNIT_GAP_E;
-		else curr_H[beg-1] = -INF;
-		int F = -INF;
-		int max_score = -INF;
-		for (int j = beg; j <= end; j++) {
-			F = max(F, curr_H[j-1] + UNIT_GAP_O) + UNIT_GAP_E;
-			curr_E[j] = max(prev_E[j], prev_H[j] + UNIT_GAP_O) + UNIT_GAP_E;
-			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?UNIT_MAT_S :UNIT_MIS_P);
-			curr_H[j] = max(F, M);
-			curr_H[j] = max(curr_H[j], curr_E[j]);
-			max_score = max(max_score, curr_H[j]);
-		}
-		if (end < m) curr_H[end+1] = curr_E[end+1] = -INF;
-		if (max_score == -INF) break;
-		if (i == n and end == m) ret = curr_H[m];
-
-		swap(prev_H, curr_H);
-		swap(prev_E, curr_E);
-	}
 	return ret;
 }
 
@@ -1150,10 +1210,10 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	const string &name_t = target.name, &name_q = query.name;
 	const string &seq_t = target.seq, &seq_q = query.seq;
 	int t_len = seq_t.length(), q_len = seq_q.length();
-	const char *t_seq = seq_t.c_str(), *q_seq = seq_q.data();
+	const char *t_seq = seq_t.data(), *q_seq = seq_q.data();
 
-	vector<LongRepeats> lr_t = collect_long_repeats(opt, t_len, t_seq);
-	vector<LongRepeats> lr_q = collect_long_repeats(opt, q_len, q_seq);
+	vector<TandemRepeats> lr_t = collect_long_repeats2(opt, t_len, t_seq);
+	vector<TandemRepeats> lr_q = collect_long_repeats(opt, q_len, q_seq);
 
 	if (opt.log_prefix) {
 		FILE* fo = fopen((string(opt.log_prefix) + "_t_pattern.tsv").c_str(), "w");
@@ -1193,12 +1253,12 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 		fclose(fo);
 	}
 	int t_sum = 0, q_sum = 0;
-	for (const LongRepeats &lr: lr_t) {
+	for (const TandemRepeats &lr: lr_t) {
 		for (const RepInterval &r: lr.repeats) {
 			t_sum += r.end - r.beg;
 		}
 	}
-	for (const LongRepeats &lr: lr_q) {
+	for (const TandemRepeats &lr: lr_q) {
 		for (const RepInterval &r: lr.repeats) {
 			q_sum += r.end - r.beg;
 		}
@@ -1318,7 +1378,7 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 		int pid = us_find(parent_set, max_id);
 		for (int i: x) {
 			if (i == max_id) continue;
-			LongRepeats lr;
+			TandemRepeats lr;
 			if (i < lr_t.size()) {
 				vector<RepInterval> &r = lr_t[i].repeats;
 				int os = r.front().beg;
@@ -1394,14 +1454,14 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 
 	int n = 0, m = 0;
 	t_sum = 0; q_sum = 0;
-	for (LongRepeats &lr: lr_t) {
+	for (TandemRepeats &lr: lr_t) {
 		lr.base_idx = n;
 		n += lr.repeats.size();
 		for (const RepInterval &r: lr.repeats) {
 			t_sum += r.end - r.beg;
 		}
 	}
-	for (LongRepeats &lr: lr_q) {
+	for (TandemRepeats &lr: lr_q) {
 		lr.base_idx = m;
 		m += lr.repeats.size();
 		for (const RepInterval &r: lr.repeats) {
@@ -1415,10 +1475,10 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	double t_cpu = cputime(), t_real = realtime();
 	vector<vector<int>> matrix(n); // FIXME: memory inefficient for this sparse matrix
 	for (int i = 0; i < n; i++) matrix[i].resize(m, -INF);
-	for (const LongRepeats &lt : lr_t) {
+	for (const TandemRepeats &lt : lr_t) {
 		int idx_t = lt.base_idx;
 		int pid_t = lt.pid;
-		for (const LongRepeats &lq : lr_q) {
+		for (const TandemRepeats &lq : lr_q) {
 			int idx_q = lq.base_idx;
 			int pid_q = lq.pid;
 			if (pid_q != pid_t) continue;
@@ -1429,7 +1489,7 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 				for (int j = 0; j < lq.repeats.size(); j++) {
 					const RepInterval &q = lq.repeats[j];
 					matrix[idx_t + i][idx_q + j] = global_alignment(
-						opt, t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
+						opt.self_aln, t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
 				}
 			}
 		}
@@ -1448,7 +1508,7 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	// TODO: set the penalty of deleting units
 	// sqrt(2 * L * max_div * mis_penalty)
 	t_cpu = cputime(); t_real = realtime();
-	const int DEL_UNIT = opt.del_unit;
+	const int DEL_UNIT = opt.del_unit_pen;
 	const int VERTICAL = 1;
 	const int HORIZONTAL = 2;
 	const int DIAGONAL = 3;
@@ -1521,11 +1581,11 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 		fprintf(fo, "%s\t%s\t%s\n", "match", "mismatch", "gap");
 	}
 	vector<RepInterval> agg_t;
-	for (const LongRepeats &lr: lr_t) {
+	for (const TandemRepeats &lr: lr_t) {
 		agg_t.insert(agg_t.end(), lr.repeats.begin(), lr.repeats.end());
 	}
 	vector<RepInterval> agg_q;
-	for (const LongRepeats &lr: lr_q) {
+	for (const TandemRepeats &lr: lr_q) {
 		agg_q.insert(agg_q.end(), lr.repeats.begin(), lr.repeats.end());
 	}
 
