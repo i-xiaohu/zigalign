@@ -15,38 +15,47 @@ using namespace std;
 
 const int INF = 100000000;
 const int SA_MAX_LEN = 50000; // Self-alignment max length
-const int PART_LEN = 40000;
+const int SA_PART_LEN = 20000;
 const double MIN_MATCH_RATIO = 0.6;
 const bool DEBUG = false;
 
+struct ScoreParameters {
+    int mat, mis, gap_o, gap_e;
+    ScoreParameters(int ma, int mi, int go, int ge): mat(ma), mis(mi), gap_o(go), gap_e(ge) {}
+};
+
 // Zigalign parameters
 struct ZigOptions {
-    // Scoring matrix for repeats in pairwise alignment
+    // SI model
+    ScoreParameters si{1, -4, -6, -1};
+    // DSI model
+    int min_unit_size = 50;
+    int max_unit_size = 5000;
+    int open_tr_pen = -12;
+    int close_tr_pen = -36;
+    ScoreParameters self_aln{1, -1, -4, -1};
+    ScoreParameters unit_aln{1, -120, -180, -30};
+    int del_unit_pen = -20;
+
+    int n_threads = 8;
+    const char *log_prefix = nullptr; // Intermediate results
+
+    // ----------------------------------------- //
+    // Scoring parameters for repeats in pairwise alignment
     int mat_score;
     int mis_pen;
     int gap_o;
     int gap_e;
-    // Minimum repeat unit size
-    int min_unit_size;
     // Scoring matrix for repeats in self-alignment
     int sa_mat_score;
     int sa_mis_pen;
     int sa_gap_o;
     int sa_gap_e;
-    // Penalty for opening/closing tandem repeats
-    int open_tr_pen;
-    int close_tr_pen;
     // Penalty for deleting duplications
-    int del_unit;
     int del_dup_o;
     int del_dup_e;
     // K-band size
     int band_width;
-    // #Threads
-    int n_threads;
-    // Intermediate results
-    const char *log_prefix;
-
     ZigOptions() {
         // Scoring parameters should be adjusted by duplication and variation rate
         mat_score = 1;
@@ -60,7 +69,7 @@ struct ZigOptions {
         sa_gap_e = -1;
         open_tr_pen = -2;
         close_tr_pen = -6;
-        del_unit = -20;
+        del_unit_pen = -20;
         del_dup_o = -6;
         del_dup_e = -2;
         band_width = 50;
@@ -104,7 +113,7 @@ struct RepInterval {
     }
 };
 
-vector<RepInterval> self_alignment(const ZigOptions &o, int n, const char *seq, vector<vector<Bt1Cell>> &bt);
+vector<RepInterval> self_alignment(const ZigOptions &opt, int n, const char *seq, vector<vector<Bt1Cell>> &bt);
 
 void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q);
 
