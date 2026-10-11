@@ -592,6 +592,18 @@ void write_repeats(FILE *fo, const vector<TandemRepeats> &tr)
 	}
 }
 
+void write_repeats2(FILE *fo, const vector<TandemRepeats> &tr, const char *seq)
+{
+	fprintf(fo, "%s\t%s\t%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len", "mis", "gap");
+	for (int i = 0; i < tr.size(); i++) {
+		for (const RepInterval &r: tr[i].repeats) {
+			fprintf(fo, "%d\t%d\t%d\t%d\t%d\t%d\n", i + 1, r.beg, r.end, r.end - r.beg, r.mis, r.gap);
+			for (int j = r.beg; j < r.end; j++) fprintf(fo, "%c", seq[j]);
+			fprintf(fo, "\n");
+		}
+	}
+}
+
 vector<TandemRepeats> read_repeats(const string &fn)
 {
 	vector<TandemRepeats> ret;
@@ -643,37 +655,34 @@ vector<TandemRepeats> read_repeats(const string &fn)
 // Test if group B can be merged into group A
 bool merge_tr_test(const TandemRepeats &tr_a, const char *seq_a, const TandemRepeats &tr_b, const char *seq_b)
 {
-	const int MAX_COMPARE = 300;
-	// The average length is more reliable
+	// Average length is more reliable
 	double len_diff = abs(tr_a.ave_len - tr_b.ave_len) / tr_a.ave_len;
-	if (len_diff < MAX_TR_DIV) {
-		// Template of B: U + U
-		const RepInterval &b = tr_b.repeats.front();
+	if (len_diff > MAX_TR_DIV) return false;
+
+	// Use average divergence to reduce the disturbance of outliers
+	const int MAX_COMPARE = 20;
+	int step_a = (tr_a.repeats.size() + MAX_COMPARE - 1) / MAX_COMPARE;
+	int step_b = (tr_b.repeats.size() + MAX_COMPARE - 1) / MAX_COMPARE;
+	int n_comp = 0;
+	double ave_div = 0;
+	for (int i = 0; i < tr_b.repeats.size(); i += step_b) {
+		const RepInterval &b = tr_b.repeats[i];
 		int len_b = b.end - b.beg;
 		string sb;
 		sb.resize(len_b);
 		memcpy((char*) sb.data(), seq_b + b.beg, len_b);
 		sb += sb;
-		// Use average divergence to reduce disturbance of outliers
-		int n_comp = 0;
-		double ave_div = 0;
-		for (const RepInterval &a: tr_a.repeats) {
+		for (int j = 0; j < tr_a.repeats.size(); j += step_a) {
+			const RepInterval &a = tr_a.repeats[j];
 			int len_a = a.end - a.beg;
-			double len_div = 1.0 * abs(len_b - len_a) / min(len_b, len_a);
-			if (len_div > MAX_TR_DIV) continue;
 			// Use semi-global alignment to handle repeat rotations
 			SgResult sg = semi_global(len_a, seq_a + a.beg, sb.length(), sb.data());
 			n_comp++;
 			ave_div += 1.0 * (sg.mis + sg.gap) / len_a;
-			if (n_comp > MAX_COMPARE) break;
 		}
-		ave_div /= n_comp;
-		if (ave_div < MAX_TR_DIV) {
-			return true;
-		}
-		// fprintf(stderr, "ave_div = %.2f, merge = %d\n", ave_div, to_merge);
 	}
-	return false;
+	ave_div /= n_comp;
+	return ave_div < MAX_TR_DIV;
 }
 
 vector<TandemRepeats> collect_long_repeats2(const ZigOptions &opt, int n, const char *seq)
@@ -1932,18 +1941,6 @@ int categorize_repeats(vector<TandemRepeats> &lr_t, const char *seq_t, vector<Ta
 			}
 		}
 	}
-	for (int i = 0; i < lr_q.size(); i++) {
-		TandemRepeats &a = lr_q[i];
-		for (int j = 0; j < lr_t.size(); j++) {
-			TandemRepeats &b = lr_t[j];
-			bool to_merge = merge_tr_test(b, seq_t, a, seq_q);
-			if (to_merge) {
-				us_union(set_id, a.pid, b.pid);
-				a.pid = us_find(set_id, a.pid);
-				b.pid = us_find(set_id, b.pid);
-			}
-		}
-	}
 
 	int m = 0;
 	vector<int> gid(n, -1);
@@ -1952,13 +1949,13 @@ int categorize_repeats(vector<TandemRepeats> &lr_t, const char *seq_t, vector<Ta
 		int pid = lr_t[i].pid;
 		if (gid[pid] == -1) gid[pid] = m++;
 		pid = lr_t[i].pid = gid[pid];
-		group[pid].push_back(make_pair(true, i));
+		group[pid].emplace_back(true, i);
 	}
 	for (int i = 0; i < lr_q.size(); i++) {
 		int pid = lr_q[i].pid;
 		if (gid[pid] == -1) gid[pid] = m++;
 		pid = lr_q[i].pid = gid[pid];
-		group[pid].emplace_back(make_pair(false, i));
+		group[pid].emplace_back(false, i);
 	}
 	fprintf(stderr, "Categorize %ld TR groups to %d classes\n", lr_t.size() + lr_q.size(), m);
 	for (int i = 0; i < m; i++) {
@@ -1979,6 +1976,24 @@ int categorize_repeats(vector<TandemRepeats> &lr_t, const char *seq_t, vector<Ta
 	return m;
 }
 
+string pickout_pattern(const TandemRepeats &tr, const char *seq)
+{
+	double min_len_diff = INF;
+	RepInterval pat_rep;
+	for (const RepInterval &r: tr.repeats) {
+		double len_diff = abs((r.end - r.beg) - tr.ave_len);
+		if (len_diff < min_len_diff) {
+			min_len_diff = len_diff;
+			pat_rep = r;
+		}
+	}
+	string ret;
+	int len = pat_rep.end - pat_rep.beg;
+	ret.resize(len);
+	memcpy((char*) ret.data(), seq + pat_rep.beg, len);
+	return ret;
+}
+
 void normalize_repeats2(const ZigOptions &opt, int n_class,
 	int t_len, const char *t_seq, vector<TandemRepeats> &lr_t,
 	int q_len, const char *q_seq, vector<TandemRepeats> &lr_q)
@@ -1987,100 +2002,108 @@ void normalize_repeats2(const ZigOptions &opt, int n_class,
 	for (const TandemRepeats &tr: lr_t) {
 		int pid = tr.pid;
 		if (patterns[pid].empty()) {
-			// Use the first repeat as template
-			const RepInterval &r = tr.repeats.front();
-			int len = r.end - r.beg;
-			patterns[pid].resize(len);
-			memcpy((char*) patterns[pid].data(), t_seq + r.beg, len);
+			patterns[pid] = pickout_pattern(tr, t_seq);
 		}
 	}
 	for (const TandemRepeats &tr: lr_q) {
 		int pid = tr.pid;
 		if (patterns[pid].empty()) {
-			const RepInterval &r = tr.repeats.front();
-			int len = r.end - r.beg;
-			patterns[pid].resize(len);
-			memcpy((char*) patterns[pid].data(), q_seq + r.beg, len);
+			patterns[pid] = pickout_pattern(tr, q_seq);
 		}
 	}
 
-	// 1) collect missed flanking repeats
-	// 2) bridge multi-thread results
+	double c_time = cputime(), r_time = realtime();
 	const int FLANK_EXT = 10;
-	const int CHUNK_SIZE = 20000;
-	const int n_threads = opt.n_threads;
-	for (const TandemRepeats &tr: lr_t) {
+	#pragma omp parallel for
+	for (int k = 0; k < lr_t.size() + lr_q.size(); k++) {
+		TandemRepeats &tr = k < lr_t.size() ?lr_t[k] :lr_q[k - lr_t.size()];
+		const char *seq = k < lr_t.size() ?t_seq :q_seq;
+		int len = k < lr_t.size() ?t_len :q_len;
+
 		const string &pat = patterns[tr.pid];
 		int l_range = tr.repeats.front().beg;
 		int r_range = tr.repeats.back().end;
 		double rep_len = tr.ave_len;
-		fprintf(stderr, "TR [%d, %d), pattern_len=%ld, ave_len=%.2f, size=%ld\n",
-			l_range, r_range, pat.size(), rep_len, tr.repeats.size());
-		int n = (r_range - l_range + CHUNK_SIZE - 1) / CHUNK_SIZE;
-		vector<vector<RepInterval>> reps_bin(n);
-		#pragma omp parallel for
-		for (int i = 0; i < n; i++) {
-			int beg = l_range + i * CHUNK_SIZE - round(rep_len * FLANK_EXT);
-			beg = max(beg, 0);
-			int end = beg + CHUNK_SIZE + round(rep_len * FLANK_EXT);
-			end = min(end, t_len);
-			reps_bin[i] = wraparound_dp(pat.length(), pat.data(), end - beg, t_seq + beg);
-			for (RepInterval &r: reps_bin[i]) {
-				r.beg += beg;
-				r.end += beg;
-			}
+		fprintf(stderr, "TR, size=%ld, len=%.2f, mis=%.2f, gap=%.2f, range=[%d,%d)\n",
+			tr.repeats.size(), tr.ave_len, tr.ave_mis, tr.ave_gap, tr.repeats.front().beg, tr.repeats.back().end);
+		fprintf(stderr, "Pattern length: %ld\n", pat.length());
+		// This is for the missed flanking repeats
+		l_range = max(0, l_range - (int)round(rep_len * FLANK_EXT));
+		r_range = min(len, r_range + (int)round(rep_len * FLANK_EXT));
+
+		vector<RepInterval> reps = wraparound_dp(
+			pat.length(), pat.data(), r_range - l_range, seq + l_range);
+		for (RepInterval &r: reps) {
+			r.beg += l_range;
+			r.end += l_range;
 		}
-		vector<RepInterval> reps;
-		for (int i = 0; i < n; i++) {
-			int trim_l = 0, trim_r = 0;
-			if (i == 0) {
-				// Trim out poor extensions
-				for (const RepInterval &r: reps_bin[i]) {
-					double div = (r.mis + r.gap) / rep_len;
-					if (div > MAX_TR_DIV) {
-						trim_l++;
-					} else {
-						break;
-					}
-				}
-				fprintf(stderr, "left trim %d poor partitions\n", trim_l);
+		int trim_l = 0, trim_r = 0;
+		// Trim out poor flanking partitions
+		for (const RepInterval &r: reps) {
+			double div = (r.mis + r.gap) / rep_len;
+			if (div > MAX_TR_DIV) {
+				trim_l++;
 			} else {
-				int pb = reps_bin[i-1].front().beg;
-				int pe = reps_bin[i-1].back().end;
-				for (const RepInterval &r: reps_bin[i]) {
-					int cb = r.beg, ce = r.end;
-					int ol = min(ce, pe) - max(cb, pb);
-					if (ol > 0) {
-						trim_l++;
-					} else {
-						break;
-					}
-				}
-				fprintf(stderr, "remove %d overlapped partitions\n", trim_l);
-			}
-			if (i == n - 1) {
-				for (int j = reps_bin[i].size() - 1; j >= 0; j--) {
-					const RepInterval &r = reps_bin[i][j];
-					double div = (r.mis + r.gap) / rep_len;
-					if (div > MAX_TR_DIV) {
-						trim_r++;
-					} else {
-						break;
-					}
-				}
-				fprintf(stderr, "right trim %d poor partitions\n", trim_r);
-			}
-			if (not reps.empty()) {
-				fprintf(stderr, "--- [%d, %d)\n", reps.back().beg, reps.back().end);
-				fprintf(stderr, "+++ [%d, %d)\n", reps_bin[i][trim_l].beg, reps_bin[i][trim_l].end);
-				fprintf(stderr, "\n");
-			}
-			for (int j = trim_l; j < reps_bin[i].size() - trim_r; j++) {
-				reps.push_back(reps_bin[i][j]);
+				break;
 			}
 		}
-		break;
+		// fprintf(stderr, "left trim %d poor partitions\n", trim_l);
+		for (int i = reps.size() - 1; i >= 0; i--) {
+			const RepInterval &r = reps[i];
+			double div = (r.mis + r.gap) / rep_len;
+			if (div > MAX_TR_DIV) {
+				trim_r++;
+			} else {
+				break;
+			}
+		}
+		// fprintf(stderr, "right trim %d poor partitions\n", trim_r);
+
+		tr.ave_len = tr.ave_gap = tr.ave_mis = 0;
+		tr.repeats.clear();
+		for (int i = trim_l; i < reps.size() - trim_r; i++) {
+			const RepInterval &r = reps[i];
+			tr.repeats.push_back(r);
+			tr.ave_len += r.end - r.beg;
+			tr.ave_gap += r.gap;
+			tr.ave_mis += r.mis;
+		}
+		// Repeats might be empty when no clear partitions emerge
+		if (not tr.repeats.empty()) tr.ave_len /= tr.repeats.size();
+		if (not tr.repeats.empty()) tr.ave_gap /= tr.repeats.size();
+		if (not tr.repeats.empty()) tr.ave_mis /= tr.repeats.size();
+
+		fprintf(stderr, "Normalized TR, size=%ld, len=%.2f, mis=%.2f, gap=%.2f, range=[%d,%d)\n",
+			tr.repeats.size(), tr.ave_len, tr.ave_mis, tr.ave_gap, tr.repeats.front().beg, tr.repeats.back().end);
+		fprintf(stderr, "\n");
 	}
+
+	int poor_tr = 0;
+	const int MIN_REP_CNT = 5;
+	int old_n = 0;
+	for (int i = 0; i < lr_t.size(); i++) {
+		if (lr_t[i].repeats.size() > MIN_REP_CNT) {
+			lr_t[old_n++] = lr_t[i];
+		} else {
+			fprintf(stderr, "remove %d size %ld from T\n", i, lr_t[i].repeats.size());
+			poor_tr++;
+		}
+	}
+	lr_t.resize(old_n);
+
+	old_n = 0;
+	for (int i = 0; i < lr_q.size(); i++) {
+		if (lr_q[i].repeats.size() > MIN_REP_CNT) {
+			lr_q[old_n++] = lr_q[i];
+		} else {
+			fprintf(stderr, "remove %d size %ld from Q\n", i, lr_q[i].repeats.size());
+			poor_tr++;
+		}
+	}
+	lr_q.resize(old_n);
+
+	fprintf(stderr, "Partition repeats and remove %d poor groups: %.2f CPU sec, %.2f real sec\n",
+		poor_tr, cputime()-c_time, realtime()-r_time);
 }
 
 void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
@@ -2097,5 +2120,4 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 
 	int n_class = categorize_repeats(lr_t, t_seq, lr_q, q_seq);
 	normalize_repeats2(opt, n_class, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
-
 }
