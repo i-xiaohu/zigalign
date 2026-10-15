@@ -1890,19 +1890,14 @@ void align_etr2(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	extended_paf_format(name_t, t_len, final_ct, name_q, q_len, final_cq, rep_id_map);
 }
 
+// TODO: parallelize it
 int categorize_repeats(vector<TandemRepeats> &lr_t, const char *seq_t, vector<TandemRepeats> &lr_q, const char *seq_q)
 {
 	int n = 0;
-	for (TandemRepeats &tr: lr_t) {
-		tr.pid = n++;
-	}
-	for (TandemRepeats &tr: lr_q) {
-		tr.pid = n++;
-	}
+	for (TandemRepeats &tr: lr_t) tr.pid = n++;
+	for (TandemRepeats &tr: lr_q) tr.pid = n++;
 	vector<int> set_id(n);
-	for (int i = 0; i < n; i++) {
-		set_id[i] = i;
-	}
+	for (int i = 0; i < n; i++) set_id[i] = i;
 
 	for (int i = 0; i < lr_t.size(); i++) {
 		TandemRepeats &a = lr_t[i];
@@ -1994,7 +1989,7 @@ string pickout_pattern(const TandemRepeats &tr, const char *seq)
 	return ret;
 }
 
-void normalize_repeats2(const ZigOptions &opt, int n_class,
+void normalize_repeats2(int n_class,
 	int t_len, const char *t_seq, vector<TandemRepeats> &lr_t,
 	int q_len, const char *q_seq, vector<TandemRepeats> &lr_q)
 {
@@ -2023,13 +2018,9 @@ void normalize_repeats2(const ZigOptions &opt, int n_class,
 		const string &pat = patterns[tr.pid];
 		int l_range = tr.repeats.front().beg;
 		int r_range = tr.repeats.back().end;
-		double rep_len = tr.ave_len;
-		fprintf(stderr, "TR, size=%ld, len=%.2f, mis=%.2f, gap=%.2f, range=[%d,%d)\n",
-			tr.repeats.size(), tr.ave_len, tr.ave_mis, tr.ave_gap, tr.repeats.front().beg, tr.repeats.back().end);
-		fprintf(stderr, "Pattern length: %ld\n", pat.length());
 		// This is for the missed flanking repeats
-		l_range = max(0, l_range - (int)round(rep_len * FLANK_EXT));
-		r_range = min(len, r_range + (int)round(rep_len * FLANK_EXT));
+		l_range = max(0, l_range - (int)round(pat.length() * FLANK_EXT));
+		r_range = min(len, r_range + (int)round(pat.length() * FLANK_EXT));
 
 		vector<RepInterval> reps = wraparound_dp(
 			pat.length(), pat.data(), r_range - l_range, seq + l_range);
@@ -2040,7 +2031,7 @@ void normalize_repeats2(const ZigOptions &opt, int n_class,
 		int trim_l = 0, trim_r = 0;
 		// Trim out poor flanking partitions
 		for (const RepInterval &r: reps) {
-			double div = (r.mis + r.gap) / rep_len;
+			double div = 1.0 * (r.mis + r.gap) / pat.length();
 			if (div > MAX_TR_DIV) {
 				trim_l++;
 			} else {
@@ -2050,7 +2041,7 @@ void normalize_repeats2(const ZigOptions &opt, int n_class,
 		// fprintf(stderr, "left trim %d poor partitions\n", trim_l);
 		for (int i = reps.size() - 1; i >= 0; i--) {
 			const RepInterval &r = reps[i];
-			double div = (r.mis + r.gap) / rep_len;
+			double div = 1.0 * (r.mis + r.gap) / pat.length();
 			if (div > MAX_TR_DIV) {
 				trim_r++;
 			} else {
@@ -2072,20 +2063,15 @@ void normalize_repeats2(const ZigOptions &opt, int n_class,
 		if (not tr.repeats.empty()) tr.ave_len /= tr.repeats.size();
 		if (not tr.repeats.empty()) tr.ave_gap /= tr.repeats.size();
 		if (not tr.repeats.empty()) tr.ave_mis /= tr.repeats.size();
-
-		fprintf(stderr, "Normalized TR, size=%ld, len=%.2f, mis=%.2f, gap=%.2f, range=[%d,%d)\n",
-			tr.repeats.size(), tr.ave_len, tr.ave_mis, tr.ave_gap, tr.repeats.front().beg, tr.repeats.back().end);
-		fprintf(stderr, "\n");
 	}
 
 	int poor_tr = 0;
-	const int MIN_REP_CNT = 5;
+	const int MIN_REP_CNT = 50;
 	int old_n = 0;
 	for (int i = 0; i < lr_t.size(); i++) {
 		if (lr_t[i].repeats.size() > MIN_REP_CNT) {
 			lr_t[old_n++] = lr_t[i];
 		} else {
-			fprintf(stderr, "remove %d size %ld from T\n", i, lr_t[i].repeats.size());
 			poor_tr++;
 		}
 	}
@@ -2096,7 +2082,6 @@ void normalize_repeats2(const ZigOptions &opt, int n_class,
 		if (lr_q[i].repeats.size() > MIN_REP_CNT) {
 			lr_q[old_n++] = lr_q[i];
 		} else {
-			fprintf(stderr, "remove %d size %ld from Q\n", i, lr_q[i].repeats.size());
 			poor_tr++;
 		}
 	}
@@ -2106,8 +2091,185 @@ void normalize_repeats2(const ZigOptions &opt, int n_class,
 		poor_tr, cputime()-c_time, realtime()-r_time);
 }
 
+void collect_nested_repeats(const ZigOptions &opt,
+	int t_len, const char *t_seq, vector<TandemRepeats> &lr_t,
+	int q_len, const char *q_seq, vector<TandemRepeats> &lr_q)
+{
+	int n = 0, m = 0;
+	for (TandemRepeats &tr: lr_t) {
+		tr.base_idx = n;
+		n += tr.repeats.size();
+	}
+	for (TandemRepeats &tr: lr_q) {
+		tr.base_idx = m;
+		m += tr.repeats.size();
+	}
+
+	vector<int> link_t(n, -1);
+	vector<int> link_q(m, -1);
+
+	const int BACKWARD_CMP = 100;
+	const double MAX_DIV = 0.1;
+	for (const TandemRepeats &tr: lr_t) {
+		#pragma omp parallel for
+		for (int i = 0; i < tr.repeats.size(); i++) {
+			const RepInterval &a = tr.repeats[i];
+			int len_a = a.end - a.beg;
+			int max_score = 0, max_id = -1;
+			for (int j = max(0, i-BACKWARD_CMP); j < i; j++) {
+				const RepInterval &b = tr.repeats[j];
+				int len_b = b.end - b.beg;
+				int bw = round(len_b * MAX_DIV);
+				GlobalResult gr = global_cigar2(opt.si, bw, len_a, t_seq + a.beg, len_b, t_seq + b.beg);
+				double div = 1.0 * (gr.mis + gr.gap) / min(len_a, len_b);
+				if (div < MAX_DIV and gr.score > max_score) {
+					max_score = gr.score;
+					max_id = j;
+				}
+			}
+			if (max_id != -1) {
+				link_t[tr.base_idx + i] = tr.base_idx + max_id;
+			}
+		}
+	}
+	vector<int> sid(n);
+	for (int i = 0; i < n; i++) sid[i] = i;
+	for (int i = 0; i < n; i++) {
+		if (link_t[i] != -1) {
+			us_union(sid, i, link_t[i]);
+		}
+	}
+	vector<int> vis(n, -1);
+	int cnt = 0;
+	for (int i = 0; i < n; i++) {
+		int x = us_find(sid, i);
+		if (vis[x] == -1) {
+			vis[x] = ++cnt;
+		}
+		fprintf(stderr, "%d -> %d\n", i, vis[x]);
+	}
+	fprintf(stderr, "cnt=%d\n", cnt);
+}
+
+struct BackboneUnit {
+	int tr_id;
+	int pid;
+	int tr_size;
+	int gap_pen; // Penalty of deleting the group
+};
+
+// Construct co-linear relationship between tandem repeats
+void construct_backbone(int n_class, const vector<TandemRepeats> &lr_t, const vector<TandemRepeats> &lr_q)
+{
+	// To handle the situation like ABA versus A where repeats are interrupted,
+	// I conjure a shadow copy of A following it, such that alignment becomes ABA versus AA'
+	vector<int> t_copy(n_class, 0);
+	vector<int> q_copy(n_class, 0);
+	for (const TandemRepeats &tr: lr_t) t_copy[tr.pid]++;
+	for (const TandemRepeats &tr: lr_q) q_copy[tr.pid]++;
+	vector<BackboneUnit> t_units, q_units;
+	for (int i = 0; i < lr_t.size(); i++) {
+		const TandemRepeats &tr = lr_t[i];
+		BackboneUnit u;
+		u.tr_id = i;
+		u.pid = tr.pid;
+		u.tr_size = tr.repeats.size();
+		u.gap_pen = -1;
+		t_units.push_back(u);
+		// Shadow units can be deleted without cost
+		for (int j = 1; j < q_copy[tr.pid]; j++) {
+			u.gap_pen = 0;
+			t_units.push_back(u);
+		}
+	}
+	for (int i = 0; i < lr_q.size(); i++) {
+		const TandemRepeats &tr = lr_q[i];
+		BackboneUnit u;
+		u.tr_id = i;
+		u.pid = tr.pid;
+		u.tr_size = tr.repeats.size();
+		u.gap_pen = -1;
+		q_units.push_back(u);
+		for (int j = 1; j < t_copy[tr.pid]; j++) {
+			u.gap_pen = 0;
+			q_units.push_back(u);
+		}
+	}
+
+	int n = t_units.size(), m = q_units.size();
+	vector<vector<int>> dp(n + 1);
+	vector<vector<int>> bt(n + 1);
+	for (int i = 0; i <= n; i++) {
+		dp[i].resize(m + 1, -INF);
+		bt[i].resize(m + 1, 0);
+	}
+	dp[0][0] = 0;
+	for (int j = 1; j <= m; j++) {
+		dp[0][j] = dp[0][j-1] + q_units[j-1].gap_pen;
+		bt[0][j] = BT_HORIZONTAL;
+	}
+	for (int i = 1; i <= n; i++) {
+		dp[i][0] = dp[i-1][0] + t_units[i-1].gap_pen;
+		bt[i][0] = BT_VERTICAL;
+	}
+	for (int i = 1; i <= n; i++) {
+		for (int j = 1; j <= m; j++) {
+			// Set match score as repeat size
+			if ((t_units[i-1].gap_pen < 0 or q_units[j-1].gap_pen < 0) and t_units[i-1].pid == q_units[j-1].pid) {
+				int d = dp[i-1][j-1] + min(t_units[i-1].tr_size, q_units[j-1].tr_size);
+				if (d > dp[i][j]) {
+					dp[i][j] = d;
+					bt[i][j] = BT_DIAGONAL;
+				}
+			}
+			int v = dp[i-1][j] + t_units[i-1].gap_pen;
+			if (v > dp[i][j]) {
+				dp[i][j] = v;
+				bt[i][j] = BT_VERTICAL;
+			}
+			int h = dp[i][j-1] + q_units[j-1].gap_pen;
+			if (h > dp[i][j]) {
+				dp[i][j] = h;
+				bt[i][j] = BT_HORIZONTAL;
+			}
+		}
+	}
+	int pi = n, pj = m;
+	while (pi > 0 or pj > 0) {
+		if (bt[pi][pj] == BT_DIAGONAL) {
+			pi--; pj--;
+			const BackboneUnit &t = t_units[pi], &q = q_units[pj];
+			fprintf(stderr, "aln %d %d\n", t.tr_id, q.tr_id);
+			const TandemRepeats &a = lr_t[t.tr_id];
+			fprintf(stderr, "  [%d,%d) size=%ld ", a.repeats.front().beg, a.repeats.back().end, a.repeats.size());
+			const TandemRepeats &b = lr_q[q.tr_id];
+			fprintf(stderr, "  [%d,%d) size=%ld\n", b.repeats.front().beg, b.repeats.back().end, b.repeats.size());
+			assert(t.pid == q.pid);
+		} else if (bt[pi][pj] == BT_VERTICAL) {
+			pi--;
+			const BackboneUnit &t = t_units[pi];
+			if (t.gap_pen < 0) {
+				fprintf(stderr, "del %d T\n", t.tr_id);
+				const TandemRepeats &a = lr_t[t.tr_id];
+				fprintf(stderr, "  [%d,%d) size=%ld\n", a.repeats.front().beg, a.repeats.back().end, a.repeats.size());
+			}
+		} else {
+			pj--;
+			const BackboneUnit &q = q_units[pj];
+			if (q.gap_pen < 0) {
+				fprintf(stderr, "del %d Q\n", q.tr_id);
+				const TandemRepeats &b = lr_q[q.tr_id];
+				fprintf(stderr, "  [%d,%d) size=%ld\n", b.repeats.front().beg, b.repeats.back().end, b.repeats.size());
+			}
+		}
+	}
+	assert(pi == 0 and pj == 0);
+}
+
 void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 {
+	// align_etr2(opt, fn_t, fn_q);
+
 	FastaSeq target = input_fasta_seq(fn_t);
 	FastaSeq query = input_fasta_seq(fn_q);
 	const string &name_t = target.name, &name_q = query.name;
@@ -2119,5 +2281,7 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	vector<TandemRepeats> lr_q = read_repeats(string(opt.log_prefix) + "_q_reps.tsv");
 
 	int n_class = categorize_repeats(lr_t, t_seq, lr_q, q_seq);
-	normalize_repeats2(opt, n_class, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
+	normalize_repeats2(n_class, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
+	// collect_nested_repeats(opt, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
+	construct_backbone(n_class, lr_t, lr_q);
 }
