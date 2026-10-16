@@ -1890,52 +1890,62 @@ void align_etr2(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	extended_paf_format(name_t, t_len, final_ct, name_q, q_len, final_cq, rep_id_map);
 }
 
-// TODO: parallelize it
-int categorize_repeats(vector<TandemRepeats> &lr_t, const char *seq_t, vector<TandemRepeats> &lr_q, const char *seq_q)
+struct CrTask {
+	const TandemRepeats &tr1;
+	const char *s1;
+	const TandemRepeats &tr2;
+	const char *s2;
+};
+
+int categorize_repeats(const ZigOptions &opt, vector<TandemRepeats> &lr_t, const char *seq_t, vector<TandemRepeats> &lr_q, const char *seq_q)
 {
+	double t_real = realtime(), t_cpu = cputime();
 	int n = 0;
 	for (TandemRepeats &tr: lr_t) tr.pid = n++;
 	for (TandemRepeats &tr: lr_q) tr.pid = n++;
 	vector<int> set_id(n);
 	for (int i = 0; i < n; i++) set_id[i] = i;
 
+	vector<CrTask> tasks;
 	for (int i = 0; i < lr_t.size(); i++) {
-		TandemRepeats &a = lr_t[i];
+		const TandemRepeats &a = lr_t[i];
 		for (int j = i - 1; j >= 0; j--) {
-			TandemRepeats &b = lr_t[j];
-			bool to_merge = merge_tr_test(b, seq_t, a, seq_t);
-			if (to_merge) {
-				us_union(set_id, a.pid, b.pid);
-				a.pid = us_find(set_id, a.pid);
-				b.pid = us_find(set_id, b.pid);
-			}
+			const TandemRepeats &b = lr_t[j];
+			tasks.emplace_back(CrTask{b, seq_t, a, seq_t});
 		}
 	}
 	for (int i = 0; i < lr_q.size(); i++) {
-		TandemRepeats &a = lr_q[i];
+		const TandemRepeats &a = lr_q[i];
 		for (int j = i - 1; j >= 0; j--) {
-			TandemRepeats &b = lr_q[j];
-			bool to_merge = merge_tr_test(b, seq_q, a, seq_q);
-			if (to_merge) {
-				us_union(set_id, a.pid, b.pid);
-				a.pid = us_find(set_id, a.pid);
-				b.pid = us_find(set_id, b.pid);
-			}
+			const TandemRepeats &b = lr_q[j];
+			tasks.emplace_back(CrTask{b, seq_q, a, seq_q});
+		}
+	}
+	for (const TandemRepeats &a : lr_t) {
+		for (const TandemRepeats &b : lr_q) {
+			tasks.emplace_back(CrTask{b, seq_q, a, seq_t});
 		}
 	}
 
-	for (int i = 0; i < lr_t.size(); i++) {
-		TandemRepeats &a = lr_t[i];
-		for (int j = 0; j < lr_q.size(); j++) {
-			TandemRepeats &b = lr_q[j];
-			bool to_merge = merge_tr_test(b, seq_q, a, seq_t);
-			if (to_merge) {
-				us_union(set_id, a.pid, b.pid);
-				a.pid = us_find(set_id, a.pid);
-				b.pid = us_find(set_id, b.pid);
-			}
+	int n_threads = opt.n_threads;
+	vector<pair<int, int>> link_bin[n_threads];
+	#pragma omp parallel for
+	for (int i = 0; i < tasks.size(); i++) {
+		CrTask &t = tasks[i];
+		bool to_merge = merge_tr_test(t.tr1, t.s1, t.tr2, t.s2);
+		if (to_merge) {
+			int tid = omp_get_thread_num();
+			link_bin[tid].emplace_back(t.tr1.pid, t.tr2.pid);
 		}
 	}
+	for (int i = 0; i < n_threads; i++) {
+		for (const pair<int,int> &p: link_bin[i]) {
+			us_union(set_id, p.first, p.second);
+		}
+	}
+	for (TandemRepeats &tr: lr_t) tr.pid = us_find(set_id, tr.pid);
+	for (TandemRepeats &tr: lr_q) tr.pid = us_find(set_id, tr.pid);
+	fprintf(stderr, "Categorize repeats in %.2f CPU sec, %.2f real sec\n", cputime() - t_cpu, realtime() - t_real);
 
 	int m = 0;
 	vector<int> gid(n, -1);
@@ -2151,107 +2161,6 @@ void collect_nested_repeats(const ZigOptions &opt,
 	fprintf(stderr, "cnt=%d\n", cnt);
 }
 
-struct BackboneUnit {
-	int tr_id;
-	int pid;
-	int value;
-};
-
-vector<uint64_t> kmers_in_repeats(const TandemRepeats &tr, const char *s)
-{
-	const int KMER_SIZE = 31;
-	const uint64_t KMER_MASK = (1UL << (KMER_SIZE * 2)) - 1;
-	const int SUNK_THRESHOLD = 500;
-	int base2int[256] = {};
-	base2int['A'] = base2int['a'] = 0;
-	base2int['C'] = base2int['c'] = 1;
-	base2int['G'] = base2int['g'] = 2;
-	base2int['T'] = base2int['t'] = 3;
-
-	vector<uint64_t> ret;
-	int beg = tr.repeats.front().beg;
-	int end = tr.repeats.back().end;
-	if (end - beg < KMER_SIZE) return ret;
-
-	uint64_t num = 0;
-	for (int i = 0; i < KMER_SIZE - 1; i++) {
-		num = num << 2 | base2int[(int)s[i]];
-	}
-	for (int i = KMER_SIZE; i < end; i++) {
-		num = num << 2 | base2int[(int)s[i]];
-		num &= KMER_MASK;
-		ret.push_back(num);
-	}
-	sort(ret.begin(), ret.end());
-	int cnt = 1, n = 0;
-	for (int i = 1; i < ret.size(); i++) {
-		if (ret[i] != ret[i-1]) {
-			if (cnt < SUNK_THRESHOLD) {
-				ret[n++] = ret[i-1];
-			}
-		} else {
-			cnt++;
-		}
-	}
-	ret.resize(n);
-	return ret;
-}
-
-int count_common_kmers(const vector<uint64_t> &a, const vector<uint64_t> &b)
-{
-	int ret = 0;
-	int j = 0;
-	for (int i = 0; i < a.size(); i++) {
-		while (j < b.size() and b[j] < a[i]) j++;
-		if (j < b.size() and b[j] == a[i]) {
-			ret++;
-		}
-	}
-	return ret;
-}
-
-// Construct co-linear relationship between tandem repeats
-void construct_backbone(const vector<TandemRepeats> &lr_t, const char *seq_t,
-	const vector<TandemRepeats> &lr_q, const char *seq_q)
-{
-	vector<int> map_t(lr_t.size(), -1);
-	vector<int> map_q(lr_q.size(), -1);
-	for (int i = 0; i < lr_t.size(); i++) {
-		vector<uint64_t> kmer_set_t = kmers_in_repeats(lr_t[i], seq_t);
-		int max_value = -INF, max_id = -1;
-		for (int j = 0; j < lr_q.size(); j++) {
-			vector<uint64_t> kmer_set_q = kmers_in_repeats(lr_q[j], seq_q);
-			int cnt = count_common_kmers(kmer_set_t, kmer_set_q);
-			cout << kmer_set_t.size() << "\t" << kmer_set_q.size() << "\t" << cnt << "\t" << 1.0 * cnt / kmer_set_t.size() << endl;
-			if (cnt > max_value) {
-				max_value = cnt;
-				max_id = j;
-			}
-		}
-		fprintf(stderr, "%d -> %d\n", i, max_id);
-		map_t[i] = max_id;
-	}
-	for (int i = 0; i < lr_q.size(); i++) {
-		vector<uint64_t> kmer_set_q = kmers_in_repeats(lr_q[i], seq_q);
-		int max_value = -INF, max_id = -1;
-		for (int j = 0; j < lr_t.size(); j++) {
-			vector<uint64_t> kmer_set_t = kmers_in_repeats(lr_t[j], seq_t);
-			int cnt = count_common_kmers(kmer_set_q, kmer_set_t);
-			if (cnt > max_value) {
-				max_value = cnt;
-				max_id = j;
-			}
-		}
-		map_q[i] = max_id;
-	}
-	for (int i = 0; i < lr_t.size(); i++) {
-		fprintf(stderr, "T %d -> Q %d\n", i, map_t[i]);
-	}
-	for (int i = 0; i < lr_q.size(); i++) {
-		fprintf(stderr, "Q %d -> T %d\n", i, map_q[i]);
-	}
-}
-
 void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 {
 	// align_etr2(opt, fn_t, fn_q);
@@ -2266,8 +2175,7 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	vector<TandemRepeats> lr_t = read_repeats(string(opt.log_prefix) + "_t_reps.tsv");
 	vector<TandemRepeats> lr_q = read_repeats(string(opt.log_prefix) + "_q_reps.tsv");
 
-	// int n_class = categorize_repeats(lr_t, t_seq, lr_q, q_seq);
-	// normalize_repeats2(n_class, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
+	int n_class = categorize_repeats(opt, lr_t, t_seq, lr_q, q_seq);
+	normalize_repeats2(n_class, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
 	// collect_nested_repeats(opt, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
-	construct_backbone(lr_t, t_seq, lr_q, q_seq);
 }
