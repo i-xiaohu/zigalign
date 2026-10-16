@@ -2154,116 +2154,102 @@ void collect_nested_repeats(const ZigOptions &opt,
 struct BackboneUnit {
 	int tr_id;
 	int pid;
-	int tr_size;
-	int gap_pen; // Penalty of deleting the group
+	int value;
 };
 
-// Construct co-linear relationship between tandem repeats
-void construct_backbone(int n_class, const vector<TandemRepeats> &lr_t, const vector<TandemRepeats> &lr_q)
+vector<uint64_t> kmers_in_repeats(const TandemRepeats &tr, const char *s)
 {
-	// To handle the situation like ABA versus A where repeats are interrupted,
-	// I conjure a shadow copy of A following it, such that alignment becomes ABA versus AA'
-	vector<int> t_copy(n_class, 0);
-	vector<int> q_copy(n_class, 0);
-	for (const TandemRepeats &tr: lr_t) t_copy[tr.pid]++;
-	for (const TandemRepeats &tr: lr_q) q_copy[tr.pid]++;
-	vector<BackboneUnit> t_units, q_units;
-	for (int i = 0; i < lr_t.size(); i++) {
-		const TandemRepeats &tr = lr_t[i];
-		BackboneUnit u;
-		u.tr_id = i;
-		u.pid = tr.pid;
-		u.tr_size = tr.repeats.size();
-		u.gap_pen = -1;
-		t_units.push_back(u);
-		// Shadow units can be deleted without cost
-		for (int j = 1; j < q_copy[tr.pid]; j++) {
-			u.gap_pen = 0;
-			t_units.push_back(u);
-		}
-	}
-	for (int i = 0; i < lr_q.size(); i++) {
-		const TandemRepeats &tr = lr_q[i];
-		BackboneUnit u;
-		u.tr_id = i;
-		u.pid = tr.pid;
-		u.tr_size = tr.repeats.size();
-		u.gap_pen = -1;
-		q_units.push_back(u);
-		for (int j = 1; j < t_copy[tr.pid]; j++) {
-			u.gap_pen = 0;
-			q_units.push_back(u);
-		}
-	}
+	const int KMER_SIZE = 31;
+	const uint64_t KMER_MASK = (1UL << (KMER_SIZE * 2)) - 1;
+	const int SUNK_THRESHOLD = 500;
+	int base2int[256] = {};
+	base2int['A'] = base2int['a'] = 0;
+	base2int['C'] = base2int['c'] = 1;
+	base2int['G'] = base2int['g'] = 2;
+	base2int['T'] = base2int['t'] = 3;
 
-	int n = t_units.size(), m = q_units.size();
-	vector<vector<int>> dp(n + 1);
-	vector<vector<int>> bt(n + 1);
-	for (int i = 0; i <= n; i++) {
-		dp[i].resize(m + 1, -INF);
-		bt[i].resize(m + 1, 0);
+	vector<uint64_t> ret;
+	int beg = tr.repeats.front().beg;
+	int end = tr.repeats.back().end;
+	if (end - beg < KMER_SIZE) return ret;
+
+	uint64_t num = 0;
+	for (int i = 0; i < KMER_SIZE - 1; i++) {
+		num = num << 2 | base2int[(int)s[i]];
 	}
-	dp[0][0] = 0;
-	for (int j = 1; j <= m; j++) {
-		dp[0][j] = dp[0][j-1] + q_units[j-1].gap_pen;
-		bt[0][j] = BT_HORIZONTAL;
+	for (int i = KMER_SIZE; i < end; i++) {
+		num = num << 2 | base2int[(int)s[i]];
+		num &= KMER_MASK;
+		ret.push_back(num);
 	}
-	for (int i = 1; i <= n; i++) {
-		dp[i][0] = dp[i-1][0] + t_units[i-1].gap_pen;
-		bt[i][0] = BT_VERTICAL;
-	}
-	for (int i = 1; i <= n; i++) {
-		for (int j = 1; j <= m; j++) {
-			// Set match score as repeat size
-			if ((t_units[i-1].gap_pen < 0 or q_units[j-1].gap_pen < 0) and t_units[i-1].pid == q_units[j-1].pid) {
-				int d = dp[i-1][j-1] + min(t_units[i-1].tr_size, q_units[j-1].tr_size);
-				if (d > dp[i][j]) {
-					dp[i][j] = d;
-					bt[i][j] = BT_DIAGONAL;
-				}
-			}
-			int v = dp[i-1][j] + t_units[i-1].gap_pen;
-			if (v > dp[i][j]) {
-				dp[i][j] = v;
-				bt[i][j] = BT_VERTICAL;
-			}
-			int h = dp[i][j-1] + q_units[j-1].gap_pen;
-			if (h > dp[i][j]) {
-				dp[i][j] = h;
-				bt[i][j] = BT_HORIZONTAL;
-			}
-		}
-	}
-	int pi = n, pj = m;
-	while (pi > 0 or pj > 0) {
-		if (bt[pi][pj] == BT_DIAGONAL) {
-			pi--; pj--;
-			const BackboneUnit &t = t_units[pi], &q = q_units[pj];
-			fprintf(stderr, "aln %d %d\n", t.tr_id, q.tr_id);
-			const TandemRepeats &a = lr_t[t.tr_id];
-			fprintf(stderr, "  [%d,%d) size=%ld ", a.repeats.front().beg, a.repeats.back().end, a.repeats.size());
-			const TandemRepeats &b = lr_q[q.tr_id];
-			fprintf(stderr, "  [%d,%d) size=%ld\n", b.repeats.front().beg, b.repeats.back().end, b.repeats.size());
-			assert(t.pid == q.pid);
-		} else if (bt[pi][pj] == BT_VERTICAL) {
-			pi--;
-			const BackboneUnit &t = t_units[pi];
-			if (t.gap_pen < 0) {
-				fprintf(stderr, "del %d T\n", t.tr_id);
-				const TandemRepeats &a = lr_t[t.tr_id];
-				fprintf(stderr, "  [%d,%d) size=%ld\n", a.repeats.front().beg, a.repeats.back().end, a.repeats.size());
+	sort(ret.begin(), ret.end());
+	int cnt = 1, n = 0;
+	for (int i = 1; i < ret.size(); i++) {
+		if (ret[i] != ret[i-1]) {
+			if (cnt < SUNK_THRESHOLD) {
+				ret[n++] = ret[i-1];
 			}
 		} else {
-			pj--;
-			const BackboneUnit &q = q_units[pj];
-			if (q.gap_pen < 0) {
-				fprintf(stderr, "del %d Q\n", q.tr_id);
-				const TandemRepeats &b = lr_q[q.tr_id];
-				fprintf(stderr, "  [%d,%d) size=%ld\n", b.repeats.front().beg, b.repeats.back().end, b.repeats.size());
-			}
+			cnt++;
 		}
 	}
-	assert(pi == 0 and pj == 0);
+	ret.resize(n);
+	return ret;
+}
+
+int count_common_kmers(const vector<uint64_t> &a, const vector<uint64_t> &b)
+{
+	int ret = 0;
+	int j = 0;
+	for (int i = 0; i < a.size(); i++) {
+		while (j < b.size() and b[j] < a[i]) j++;
+		if (j < b.size() and b[j] == a[i]) {
+			ret++;
+		}
+	}
+	return ret;
+}
+
+// Construct co-linear relationship between tandem repeats
+void construct_backbone(const vector<TandemRepeats> &lr_t, const char *seq_t,
+	const vector<TandemRepeats> &lr_q, const char *seq_q)
+{
+	vector<int> map_t(lr_t.size(), -1);
+	vector<int> map_q(lr_q.size(), -1);
+	for (int i = 0; i < lr_t.size(); i++) {
+		vector<uint64_t> kmer_set_t = kmers_in_repeats(lr_t[i], seq_t);
+		int max_value = -INF, max_id = -1;
+		for (int j = 0; j < lr_q.size(); j++) {
+			vector<uint64_t> kmer_set_q = kmers_in_repeats(lr_q[j], seq_q);
+			int cnt = count_common_kmers(kmer_set_t, kmer_set_q);
+			cout << kmer_set_t.size() << "\t" << kmer_set_q.size() << "\t" << cnt << "\t" << 1.0 * cnt / kmer_set_t.size() << endl;
+			if (cnt > max_value) {
+				max_value = cnt;
+				max_id = j;
+			}
+		}
+		fprintf(stderr, "%d -> %d\n", i, max_id);
+		map_t[i] = max_id;
+	}
+	for (int i = 0; i < lr_q.size(); i++) {
+		vector<uint64_t> kmer_set_q = kmers_in_repeats(lr_q[i], seq_q);
+		int max_value = -INF, max_id = -1;
+		for (int j = 0; j < lr_t.size(); j++) {
+			vector<uint64_t> kmer_set_t = kmers_in_repeats(lr_t[j], seq_t);
+			int cnt = count_common_kmers(kmer_set_q, kmer_set_t);
+			if (cnt > max_value) {
+				max_value = cnt;
+				max_id = j;
+			}
+		}
+		map_q[i] = max_id;
+	}
+	for (int i = 0; i < lr_t.size(); i++) {
+		fprintf(stderr, "T %d -> Q %d\n", i, map_t[i]);
+	}
+	for (int i = 0; i < lr_q.size(); i++) {
+		fprintf(stderr, "Q %d -> T %d\n", i, map_q[i]);
+	}
 }
 
 void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
@@ -2280,8 +2266,8 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	vector<TandemRepeats> lr_t = read_repeats(string(opt.log_prefix) + "_t_reps.tsv");
 	vector<TandemRepeats> lr_q = read_repeats(string(opt.log_prefix) + "_q_reps.tsv");
 
-	int n_class = categorize_repeats(lr_t, t_seq, lr_q, q_seq);
-	normalize_repeats2(n_class, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
+	// int n_class = categorize_repeats(lr_t, t_seq, lr_q, q_seq);
+	// normalize_repeats2(n_class, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
 	// collect_nested_repeats(opt, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
-	construct_backbone(n_class, lr_t, lr_q);
+	construct_backbone(lr_t, t_seq, lr_q, q_seq);
 }
