@@ -1041,80 +1041,20 @@ void align_etr2(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	exit(1);
 }
 
-struct CrTask {
-	const TandemRepeats &tr1;
-	const char *s1;
-	const TandemRepeats &tr2;
-	const char *s2;
-};
-
-int categorize_repeats(const ZigOptions &opt, vector<TandemRepeats> &lr_t, const char *seq_t, vector<TandemRepeats> &lr_q, const char *seq_q)
+void print_groups(int n, const vector<TandemRepeats> &lr_t, const vector<TandemRepeats> &lr_q)
 {
-	double t_real = realtime(), t_cpu = cputime();
-	int n = 0;
-	for (TandemRepeats &tr: lr_t) tr.pid = n++;
-	for (TandemRepeats &tr: lr_q) tr.pid = n++;
-	vector<int> set_id(n);
-	for (int i = 0; i < n; i++) set_id[i] = i;
-
-	vector<CrTask> tasks;
-	for (int i = 0; i < lr_t.size(); i++) {
-		const TandemRepeats &a = lr_t[i];
-		for (int j = i - 1; j >= 0; j--) {
-			const TandemRepeats &b = lr_t[j];
-			tasks.emplace_back(CrTask{b, seq_t, a, seq_t});
-		}
-	}
-	for (int i = 0; i < lr_q.size(); i++) {
-		const TandemRepeats &a = lr_q[i];
-		for (int j = i - 1; j >= 0; j--) {
-			const TandemRepeats &b = lr_q[j];
-			tasks.emplace_back(CrTask{b, seq_q, a, seq_q});
-		}
-	}
-	for (const TandemRepeats &a : lr_t) {
-		for (const TandemRepeats &b : lr_q) {
-			tasks.emplace_back(CrTask{b, seq_q, a, seq_t});
-		}
-	}
-
-	int n_threads = opt.n_threads;
-	vector<pair<int, int>> link_bin[n_threads];
-	#pragma omp parallel for
-	for (int i = 0; i < tasks.size(); i++) {
-		CrTask &t = tasks[i];
-		bool to_merge = merge_tr_test(t.tr1, t.s1, t.tr2, t.s2);
-		if (to_merge) {
-			int tid = omp_get_thread_num();
-			link_bin[tid].emplace_back(t.tr1.pid, t.tr2.pid);
-		}
-	}
-	for (int i = 0; i < n_threads; i++) {
-		for (const pair<int,int> &p: link_bin[i]) {
-			us_union(set_id, p.first, p.second);
-		}
-	}
-	for (TandemRepeats &tr: lr_t) tr.pid = us_find(set_id, tr.pid);
-	for (TandemRepeats &tr: lr_q) tr.pid = us_find(set_id, tr.pid);
-	fprintf(stderr, "Categorize repeats in %.2f CPU sec, %.2f real sec\n", cputime() - t_cpu, realtime() - t_real);
-
-	int m = 0;
-	vector<int> gid(n, -1);
 	vector<pair<bool, int>> group[n];
 	for (int i = 0; i < lr_t.size(); i++) {
 		int pid = lr_t[i].pid;
-		if (gid[pid] == -1) gid[pid] = m++;
-		pid = lr_t[i].pid = gid[pid];
 		group[pid].emplace_back(true, i);
 	}
 	for (int i = 0; i < lr_q.size(); i++) {
 		int pid = lr_q[i].pid;
-		if (gid[pid] == -1) gid[pid] = m++;
-		pid = lr_q[i].pid = gid[pid];
 		group[pid].emplace_back(false, i);
 	}
-	fprintf(stderr, "Categorize %ld TR groups to %d classes\n", lr_t.size() + lr_q.size(), m);
-	for (int i = 0; i < m; i++) {
+	fprintf(stderr, "Categorize %ld TR groups to %d classes\n", lr_t.size() + lr_q.size(), n);
+	for (int i = 0; i < n; i++) {
+		if (group[i].empty()) continue;
 		fprintf(stderr, "Class %d:\n", i + 1);
 		for (const pair<bool, int> &p: group[i]) {
 			if (p.first) {
@@ -1129,6 +1069,69 @@ int categorize_repeats(const ZigOptions &opt, vector<TandemRepeats> &lr_t, const
 		}
 	}
 	fprintf(stderr, "\n");
+}
+
+int update_pid(vector<TandemRepeats> &lr_t, vector<TandemRepeats> &lr_q)
+{
+	int n = 0;
+	for (const TandemRepeats &tr: lr_t) n = max(n, tr.pid);
+	for (const TandemRepeats &tr: lr_q) n = max(n, tr.pid);
+	n++;
+
+	int m = 0;
+	vector<int> gid(n, -1);
+	for (int i = 0; i < lr_t.size(); i++) {
+		int pid = lr_t[i].pid;
+		if (gid[pid] == -1) gid[pid] = m++;
+		lr_t[i].pid = gid[pid];
+	}
+	for (int i = 0; i < lr_q.size(); i++) {
+		int pid = lr_q[i].pid;
+		if (gid[pid] == -1) gid[pid] = m++;
+		lr_q[i].pid = gid[pid];
+	}
+	return m;
+}
+
+int categorize_repeats(const ZigOptions &opt, vector<TandemRepeats> &lr_t, const char *seq_t, vector<TandemRepeats> &lr_q, const char *seq_q)
+{
+	double t_real = realtime(), t_cpu = cputime();
+	int n = 0;
+	for (TandemRepeats &tr: lr_t) tr.pid = n++;
+	for (TandemRepeats &tr: lr_q) tr.pid = n++;
+	vector<int> set_id(n);
+	for (int i = 0; i < n; i++) set_id[i] = i;
+
+	vector<pair<int,int>> tasks;
+	for (int i = 0; i < lr_t.size(); i++) {
+		for (int j = 0; j < lr_q.size(); j++) {
+			tasks.emplace_back(i, j);
+		}
+	}
+
+	int n_threads = opt.n_threads;
+	vector<pair<int, int>> link_bin[n_threads];
+	#pragma omp parallel for
+	for (int i = 0; i < tasks.size(); i++) {
+		const pair<int,int> &p = tasks[i];
+		const TandemRepeats &t = lr_t[p.first];
+		const TandemRepeats &q = lr_q[p.second];
+		bool to_merge = merge_tr_test(t, seq_t, q, seq_q);
+		if (to_merge) {
+			int tid = omp_get_thread_num();
+			link_bin[tid].emplace_back(t.pid, q.pid);
+		}
+	}
+	for (int i = 0; i < n_threads; i++) {
+		for (const pair<int,int> &p: link_bin[i]) {
+			us_union(set_id, p.first, p.second);
+		}
+	}
+	for (TandemRepeats &tr: lr_t) tr.pid = us_find(set_id, tr.pid);
+	for (TandemRepeats &tr: lr_q) tr.pid = us_find(set_id, tr.pid);
+	fprintf(stderr, "Categorize repeats in %.2f CPU sec, %.2f real sec\n", cputime() - t_cpu, realtime() - t_real);
+
+	int m = update_pid(lr_t, lr_q);
 	return m;
 }
 
@@ -1150,7 +1153,7 @@ string pickout_pattern(const TandemRepeats &tr, const char *seq)
 	return ret;
 }
 
-void normalize_repeats2(int n_class,
+void normalize_repeats2(int &n_class,
 	int t_len, const char *t_seq, vector<TandemRepeats> &lr_t,
 	int q_len, const char *q_seq, vector<TandemRepeats> &lr_q)
 {
@@ -1226,17 +1229,7 @@ void normalize_repeats2(int n_class,
 		if (not tr.repeats.empty()) tr.ave_mis /= tr.repeats.size();
 	}
 
-	int poor_tr = 0;
-	const int MIN_REP_CNT = 50;
-	int old_n = 0;
-	for (int i = 0; i < lr_t.size(); i++) {
-		if (lr_t[i].repeats.size() > MIN_REP_CNT) {
-			lr_t[old_n++] = lr_t[i];
-		} else {
-			poor_tr++;
-		}
-	}
-	lr_t.resize(old_n);
+	// FIXME: it shouldn't happen
 	for (int i = 0; i < lr_t.size() - 1; i++) {
 		int beg = lr_t[i+1].repeats.front().beg;
 		vector<RepInterval> &reps = lr_t[i].repeats;
@@ -1255,15 +1248,6 @@ void normalize_repeats2(int n_class,
 		reps.resize(m);
 	}
 
-	old_n = 0;
-	for (int i = 0; i < lr_q.size(); i++) {
-		if (lr_q[i].repeats.size() > MIN_REP_CNT) {
-			lr_q[old_n++] = lr_q[i];
-		} else {
-			poor_tr++;
-		}
-	}
-	lr_q.resize(old_n);
 	for (int i = 0; i < lr_q.size() - 1; i++) {
 		int beg = lr_q[i+1].repeats.front().beg;
 		vector<RepInterval> &reps = lr_q[i].repeats;
@@ -1281,6 +1265,30 @@ void normalize_repeats2(int n_class,
 		}
 		reps.resize(m);
 	}
+
+	int poor_tr = 0;
+	const int MIN_REP_CNT = 50;
+	int old_n = 0;
+	for (int i = 0; i < lr_t.size(); i++) {
+		if (lr_t[i].repeats.size() > MIN_REP_CNT) {
+			lr_t[old_n++] = lr_t[i];
+		} else {
+			poor_tr++;
+		}
+	}
+	lr_t.resize(old_n);
+
+	old_n = 0;
+	for (int i = 0; i < lr_q.size(); i++) {
+		if (lr_q[i].repeats.size() > MIN_REP_CNT) {
+			lr_q[old_n++] = lr_q[i];
+		} else {
+			poor_tr++;
+		}
+	}
+	lr_q.resize(old_n);
+
+	n_class = update_pid(lr_t, lr_q);
 
 	fprintf(stderr, "Partition repeats and remove %d poor groups: %.2f CPU sec, %.2f real sec\n",
 		poor_tr, cputime()-c_time, realtime()-r_time);
@@ -1747,132 +1755,49 @@ void align_all_repeats(const ZigOptions &opt,
 	// extended_paf_format(name_t, t_len, final_ct, name_q, q_len, final_cq, rep_id_map);
 }
 
-struct BackboneUnit {
-	int tr_id;
-	int pid;
-	double val;
-};
-
-// Construct co-linear relationship between tandem repeats
-void construct_backbone(int n_class, const vector<TandemRepeats> &lr_t, const vector<TandemRepeats> &lr_q)
+bool cmp_unit(const char *t, const RepInterval &x, const char *q, const RepInterval &y)
 {
-	vector<int> copy_t(n_class, 0);
-	vector<int> copy_q(n_class, 0);
-	for (const TandemRepeats &tr: lr_t) copy_t[tr.pid]++;
-	for (const TandemRepeats &tr: lr_q) copy_q[tr.pid]++;
+	if (x.end - x.beg != y.end - y.beg) return false;
+	int len = x.end - x.beg;
+	for (int j = 0; j < len; j++) {
+		if (t[x.beg + j] != q[y.beg + j]) return false;
+	}
+	return true;
+}
 
-	vector<BackboneUnit> t_units, q_units;
-	int last_pos = 0;
+void construct_backbone(const char *seq_t, const vector<TandemRepeats> &lr_t, const char *seq_q, const vector<TandemRepeats> &lr_q)
+{
+	int n = 0;
+	int m = 0;
+	for (const TandemRepeats &tr: lr_t) {
+		n += tr.repeats.size();
+	}
+	for (const TandemRepeats &tr: lr_q) {
+		m += tr.repeats.size();
+	}
+	cout << n << "\t" << m << endl;
+	return ;
+
 	for (int i = 0; i < lr_t.size(); i++) {
-		const TandemRepeats &tr = lr_t[i];
-		int beg = tr.repeats.front().beg;
-		// Non-repetitive region
-		if (beg > last_pos) {
-			BackboneUnit u;
-			u.tr_id = u.pid = -1;
-			u.val = beg - last_pos; // Number of bases
-			t_units.push_back(u);
-			fprintf(stderr, "T [%d, %d) len=%d\n", last_pos, beg, beg - last_pos);
-		}
-		// Divide the repeat into chunks of same size
-		BackboneUnit u;
-		u.tr_id = i;
-		u.pid = tr.pid;
-		for (int j = 0; j < copy_q[tr.pid]; j++) {
-			u.val = 1.0 * tr.repeats.size() / copy_q[tr.pid]; // Number of repeat units
-			t_units.push_back(u);
-		}
-		last_pos = tr.repeats.back().end;
-	}
-
-	last_pos = 0;
-	for (int i = 0; i < lr_q.size(); i++) {
-		const TandemRepeats &tr = lr_q[i];
-		int beg = tr.repeats.front().beg;
-		if (beg > last_pos) {
-			BackboneUnit u;
-			u.tr_id = u.pid = -1;
-			u.val = beg - last_pos;
-			q_units.push_back(u);
-			fprintf(stderr, "Q [%d, %d) len=%d\n", last_pos, beg, beg - last_pos);
-		}
-		BackboneUnit u;
-		u.tr_id = i;
-		u.pid = tr.pid;
-		for (int j = 0; j < copy_t[tr.pid]; j++) {
-			u.val = 1.0 * tr.repeats.size() / copy_t[tr.pid];
-			q_units.push_back(u);
-		}
-		last_pos = tr.repeats.back().end;
-	}
-
-	int n = t_units.size(), m = q_units.size();
-	vector<vector<double>> dp(n + 1);
-	vector<vector<double>> bt(n + 1);
-	for (int i = 0; i <= n; i++) {
-		dp[i].resize(m + 1, -INF);
-		bt[i].resize(m + 1, 0);
-	}
-	dp[0][0] = 0;
-	for (int j = 1; j <= m; j++) {
-		dp[0][j] = dp[0][j-1] - q_units[j-1].val;
-		bt[0][j] = BT_HORIZONTAL;
-	}
-	for (int i = 1; i <= n; i++) {
-		dp[i][0] = dp[i-1][0] - t_units[i-1].val;
-		bt[i][0] = BT_VERTICAL;
-	}
-	for (int i = 1; i <= n; i++) {
-		for (int j = 1; j <= m; j++) {
-			// Set match score as repeat size
-			if (t_units[i-1].pid == q_units[j-1].pid) {
-				double d = dp[i-1][j-1] - abs(t_units[i-1].val - q_units[j-1].val);
-				if (d > dp[i][j]) {
-					dp[i][j] = d;
-					bt[i][j] = BT_DIAGONAL;
+		const TandemRepeats &t = lr_t[i];
+		for (int j = 0; j < lr_q.size(); j++) {
+			const TandemRepeats &q = lr_q[j];
+			if (t.pid != q.pid) continue;
+			int cnt = 0;
+			for (const RepInterval &x: t.repeats) {
+				for (const RepInterval &y: q.repeats) {
+					if (cmp_unit(seq_t, x, seq_q, y)) {
+						cnt++;
+						break;
+					}
 				}
 			}
-			double v = dp[i-1][j] - t_units[i-1].val;
-			if (v > dp[i][j]) {
-				dp[i][j] = v;
-				bt[i][j] = BT_VERTICAL;
-			}
-			double h = dp[i][j-1] - q_units[j-1].val;
-			if (h > dp[i][j]) {
-				dp[i][j] = h;
-				bt[i][j] = BT_HORIZONTAL;
-			}
+			fprintf(stderr, "i = %d, [%ld, %d, %d) j = %d, [%ld, %d, %d), cnt = %d\n",
+				i, t.repeats.size(), t.repeats.front().beg, t.repeats.back().end,
+				j, q.repeats.size(), q.repeats.front().beg, q.repeats.back().end,
+				cnt);
 		}
 	}
-	int pi = n, pj = m;
-	while (pi > 0 or pj > 0) {
-		if (bt[pi][pj] == BT_DIAGONAL) {
-			pi--; pj--;
-			const BackboneUnit &t = t_units[pi], &q = q_units[pj];
-			fprintf(stderr, "aln %d %d\n", t.tr_id, q.tr_id);
-			if (t.tr_id == -1 or q.tr_id == -1) continue;
-			const TandemRepeats &a = lr_t[t.tr_id];
-			fprintf(stderr, "  [%d,%d) size=%ld ", a.repeats.front().beg, a.repeats.back().end, a.repeats.size());
-			const TandemRepeats &b = lr_q[q.tr_id];
-			fprintf(stderr, "  [%d,%d) size=%ld\n", b.repeats.front().beg, b.repeats.back().end, b.repeats.size());
-			assert(t.pid == q.pid);
-		} else if (bt[pi][pj] == BT_VERTICAL) {
-			pi--;
-			const BackboneUnit &t = t_units[pi];
-			fprintf(stderr, "del %d T\n", t.tr_id);
-			if (t.tr_id == -1) continue;
-			const TandemRepeats &a = lr_t[t.tr_id];
-			fprintf(stderr, "  [%d,%d) size=%ld\n", a.repeats.front().beg, a.repeats.back().end, a.repeats.size());
-		} else {
-			pj--;
-			const BackboneUnit &q = q_units[pj];
-			fprintf(stderr, "del %d Q\n", q.tr_id);
-			if (q.tr_id == -1) continue;
-			const TandemRepeats &b = lr_q[q.tr_id];
-			fprintf(stderr, "  [%d,%d) size=%ld\n", b.repeats.front().beg, b.repeats.back().end, b.repeats.size());
-		}
-	}
-	assert(pi == 0 and pj == 0);
 }
 
 void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
@@ -1891,6 +1816,7 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 
 	int n_class = categorize_repeats(opt, lr_t, t_seq, lr_q, q_seq);
 	normalize_repeats2(n_class, t_len, t_seq, lr_t, q_len, q_seq, lr_q);
-	construct_backbone(n_class, lr_t, lr_q);
+	print_groups(n_class, lr_t, lr_q);
+	construct_backbone(t_seq, lr_t, q_seq, lr_q);
 	// align_all_repeats(opt, lr_t, t_len, t_seq, lr_q, q_len, q_seq);
 }
