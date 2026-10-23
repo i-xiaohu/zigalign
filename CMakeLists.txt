@@ -11,6 +11,8 @@ add_executable(zigalign
         zigalign.h
         zigalign_str.cpp
         zigalign_etr.cpp
-        main.cpp)
+        main.cpp
+        wraparound.cpp
+        wraparound.h)
 find_package(OpenMP REQUIRED)
 target_link_libraries(zigalign -lz OpenMP::OpenMP_CXX)

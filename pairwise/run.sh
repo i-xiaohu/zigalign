@@ -4,6 +4,10 @@ zigalign="/mnt/d/ClionProjects/zigalign/cmake-build-debug/zigalign"
 cd /mnt/d/ClionProjects/zigalign/pairwise
 
 for i in {1..22} X; do {
+   pstat ${zigalign} -t8 -v ours/cen${i}/cen${i} centromeres/chm13_cen${i}.fa centromeres/hg002_Mcen${i}.fa # \
+      # 2> ours/cen${i}/cen${i}.log
+  break
+
    # Unialigner
 #  ${unialigner} --first centromeres/chm13_cen${i}.fa --second centromeres/hg002_Mcen${i}.fa -o unialigner/cen${i}
 #  mv unialigner/cen${i}/cigar.txt unialigner/cigar/cen${i}_cigar.txt
@@ -11,9 +15,8 @@ for i in {1..22} X; do {
 #  python cigar2plot.py unialigner/cigar/cen${i}_cigar.txt unialigner/plots/cen${i}_plot.png
 
   # Zigalign
-  pstat ${zigalign} -t8 -v ours/cen${i}/cen${i} centromeres/chm13_cen${i}.fa centromeres/hg002_Mcen${i}.fa \
-       2> ours/cen${i}/cen${i}.log 1> ours/cen${i}/cen${i}.paf
-  break
+#  pstat ${zigalign} -t8 -v ours/cen${i}/cen${i} centromeres/chm13_cen${i}.fa centromeres/hg002_Mcen${i}.fa \
+#       2> ours/cen${i}/cen${i}.log 1> ours/cen${i}/cen${i}.paf
 #   python cigar2plot.py ours/cen${i}/cen${i}.paf ours/plots/cen${i}_plot.png
 
   # edlib

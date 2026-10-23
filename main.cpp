@@ -2,7 +2,7 @@
 #include "zigalign.h"
 #include "input_fasta.h"
 
-const string VERSION = "v0.2-923";
+const string VERSION = "v0.2-023";
 
 static int str2int(const char* s) {
     return (int)strtol(s, nullptr, 10);
@@ -19,7 +19,7 @@ int usage(const ZigOptions &o) {
     fprintf(stderr, "    -B [INT]  mismatch penalty [%d]\n", o.mis_pen);
     fprintf(stderr, "    -O [INT]  open gap(indel) penalty [%d]\n", o.gap_o);
     fprintf(stderr, "    -E [INT]  extend gap penalty [%d]\n", o.gap_e);
-    fprintf(stderr, "    -D [INT]  repeat unit deletion penalty [%d]\n", o.del_unit);
+    fprintf(stderr, "    -D [INT]  repeat unit deletion penalty [%d]\n", o.del_unit_pen);
     fprintf(stderr, "  Scoring options for self-alignment:\n");
     fprintf(stderr, "    -u [INT]  minimum repeat unit size [%d]\n", o.min_unit_size);
     fprintf(stderr, "    -d [INT]  open tandem repeat penalty [%d]\n", o.open_tr_pen);
@@ -54,7 +54,7 @@ int main(int argc, char *argv[]) {
             opt.gap_e = -abs(str2int(optarg));
             break;
         case 'D':
-            opt.del_unit = -abs(str2int(optarg));
+            opt.del_unit_pen = -abs(str2int(optarg));
             break;
         case 'u':
             opt.min_unit_size = abs(str2int(optarg));

@@ -17,6 +17,7 @@ const int INF = 100000000;
 const int SA_MAX_LEN = 50000; // Self-alignment max length
 const int SA_PART_LEN = 20000;
 const double MIN_MATCH_RATIO = 0.6;
+const double MAX_TR_DIV = 0.4;
 const bool DEBUG = false;
 
 struct ScoreParameters {
