@@ -886,7 +886,9 @@ void collect_nested_repeats(const ZigOptions &opt, const TandemRepeats &tr, cons
 	}
 }
 
-vector<vector<vector<int>>> build_score_matrix(const ZigOptions &opt, int n_class,
+typedef vector<vector<vector<int>>> ScoreMatrix;
+
+ScoreMatrix build_score_matrix(const ZigOptions &opt, int n_class,
 	vector<TandemRepeats> &lr_t, int t_len, const char *t_seq,
 	vector<TandemRepeats> &lr_q, int q_len, const char *q_seq)
 {
@@ -916,7 +918,7 @@ vector<vector<vector<int>>> build_score_matrix(const ZigOptions &opt, int n_clas
 	// Build score matrix of repeat units
 	double t_cpu = cputime(), t_real = realtime();
 	const int MAX_UNITS_DEL = opt.max_units_del;
-	vector<vector<vector<int>>> matrix(n_class);
+	ScoreMatrix matrix(n_class);
 	for (int pid = 0; pid < n_class; pid++) {
 		n = reps_t[pid].size();
 		m = reps_q[pid].size();
@@ -939,7 +941,7 @@ vector<vector<vector<int>>> build_score_matrix(const ZigOptions &opt, int n_clas
 	return matrix;
 }
 
-void output_matrix(const string &fn, const vector<vector<vector<int>>> &matrix)
+void output_matrix(const string &fn, const ScoreMatrix &matrix)
 {
 	ofstream out(fn, ios::binary);
 	assert(out.is_open());
@@ -959,11 +961,11 @@ void output_matrix(const string &fn, const vector<vector<vector<int>>> &matrix)
 	out.close();
 }
 
-vector<vector<vector<int>>> input_matrix(const string &fn)
+ScoreMatrix input_matrix(const string &fn)
 {
 	ifstream in(fn, ios::binary);
 	assert(in.is_open());
-	vector<vector<vector<int>>> matrix;
+	ScoreMatrix matrix;
 	size_t n_class;
 	in.read((char*)&n_class, sizeof(int64_t));
 	matrix.resize(n_class);
@@ -982,42 +984,146 @@ vector<vector<vector<int>>> input_matrix(const string &fn)
 	return matrix;
 }
 
-struct Dp2Profile
-{
-	int pid; // -1 for SI
-	int idx;
+struct Dp2Profile {
+	int pid, idx;
 	int beg, end;
-	Dp2Profile(int p, int i, int b, int e): pid(p), idx(i), beg(b), end(e) {}
+	int aln; // -1 for deletion
+	int del_pen; // Penalty of deletion
+	Dp2Profile(int p, int i, int b, int e): pid(p), idx(i), beg(b), end(e) {
+		aln = -1;
+		del_pen = 0;
+	}
 };
 
-vector<Dp2Profile> construct_profile(int n_class, const vector<TandemRepeats> &lr, int len, const char *seq)
+vector<Dp2Profile> construct_profile(const ZigOptions &opt, int n_class, const vector<TandemRepeats> &lr)
 {
 	vector<Dp2Profile> ret;
 	vector<int> cnt(n_class, 0);
-	int os = 0;
 	for (const TandemRepeats &tr: lr) {
 		for (const RepInterval &r: tr.repeats) {
-			int pos = r.beg;
-			for (int i = os; i < pos; i++) {
-				Dp2Profile p(-1, i, i, i+1);
-				ret.push_back(p);
-			}
+			// Synchronize with score matrix
 			Dp2Profile p(tr.pid, cnt[tr.pid]++, r.beg, r.end);
+			// Deletion penalty = SI_gap_o + sqrt(unit_len) * SI_gap_e
+			p.del_pen = opt.si.gap_o + opt.si.gap_e * round(sqrt(r.end - r.beg));
 			ret.push_back(p);
-			os = r.end;
 		}
 	}
-	for (int i = os; i < len; i++) {
-		Dp2Profile p(-1, i, i, i+1);
-		ret.push_back(p);
-	}
-	assert(ret.front().beg == 0);
 	for (int i = 1; i < ret.size(); i++) {
-		assert(ret[i].beg == ret[i-1].end);
+		assert(ret[i].end >= ret[i-1].beg);
 	}
-	assert(ret.back().end == len);
-
 	return ret;
+}
+
+// This function constructs an alignment backbone for tandem repeats.
+// Compared with SI+DSI profile, it prioritizes DSI region more than SI region.
+void alignment_backbone(const ZigOptions &opt, const ScoreMatrix &matrix, vector<Dp2Profile> &pro_t, vector<Dp2Profile> &pro_q)
+{
+	double t_cpu = cputime(), t_real = realtime();
+	int n = pro_t.size(), m = pro_q.size();
+	vector<int> prev_dp(m + 1), curr_dp(m + 1);
+	vector<vector<uint8_t>> bt(n + 1);
+	for (int i = 0; i <= n; i++) bt[i].resize(m + 1, 0);
+	prev_dp[0] = 0;
+	for (int j = 1; j <= m; j++) {
+		prev_dp[j] = prev_dp[j-1] + pro_q[j-1].del_pen;
+		bt[0][j] = BT_HORIZONTAL;
+	}
+	const int MAX_UNITS_DEL = opt.max_units_del;
+	for (int i = 1; i <= n; i++) {
+		const Dp2Profile &t = pro_t[i-1];
+		curr_dp[0] = prev_dp[0] + t.del_pen; // The first column
+		bt[i][0] = BT_VERTICAL;
+		int beg = max(i - MAX_UNITS_DEL, 1);
+		int end = min(i + MAX_UNITS_DEL, m);
+		if (beg > 1) curr_dp[beg-1] = -INF; // Boundary of the band
+		for (int j = beg; j <= end; j++) {
+			const Dp2Profile &q = pro_q[j-1];
+			int v = prev_dp[j] + t.del_pen;
+			int h = curr_dp[j-1] + q.del_pen;
+			int d = -INF;
+			if (t.pid == q.pid) {
+				assert(t.pid < matrix.size());
+				assert(t.idx < matrix[t.pid].size());
+				assert(q.idx < matrix[t.pid][t.idx].size());
+				d = matrix[t.pid][t.idx][q.idx];
+			}
+
+			curr_dp[j] = -INF; // Initialization
+			if (v > curr_dp[j]) {
+				curr_dp[j] = v;
+				bt[i][j] = BT_VERTICAL;
+			}
+			if (h > curr_dp[j]) {
+				curr_dp[j] = h;
+				bt[i][j] = BT_HORIZONTAL;
+			}
+			if (d > curr_dp[j]) {
+				curr_dp[j] = d;
+				bt[i][j] = BT_DIAGONAL;
+			}
+		}
+		if (end < m) curr_dp[end+1] = -INF; // Used by the next row
+		swap(curr_dp, prev_dp);
+	}
+	fprintf(stderr, "Construct alignment backbone in %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
+	fprintf(stderr, "  Score matrix size is (%d X %d)\n", n, m);
+
+	int pi = n, pj = m;
+	while (bt[pi][pj] != 0) {
+		switch (bt[pi][pj]) {
+		case BT_DIAGONAL:
+			pi--;
+			pj--;
+			pro_t[pi].aln = pj;
+			pro_q[pj].aln = pi;
+			break;
+		case BT_VERTICAL:
+			pi--;
+			pro_t[pi].aln = -1;
+			break;
+		case BT_HORIZONTAL:
+			pj--;
+			pro_q[pj].aln = -1;
+			break;
+		default:
+			break;
+		}
+	}
+
+	int mat_n = 0, mat_len = 0;
+	int del_n = 0, del_len = 0;
+	int ins_n = 0, ins_len = 0;
+	for (int i = 0; i < pro_t.size(); i++) {
+		const Dp2Profile &t = pro_t[i];
+		if (t.aln == -1) {
+			del_n++;
+			del_len += t.end - t.beg;
+		} else {
+			const Dp2Profile &q = pro_q[t.aln];
+			assert(q.aln == i);
+			mat_n++;
+			mat_len += min(t.end - t.beg, q.end - q.beg);
+		}
+	}
+	int mat2_n = 0, mat2_len = 0;
+	for (int i = 0; i < pro_q.size(); i++) {
+		const Dp2Profile &q = pro_q[i];
+		if (q.aln == -1) {
+			ins_n++;
+			ins_len += q.end - q.beg;
+		} else {
+			const Dp2Profile &t = pro_t[q.aln];
+			assert(t.aln == i);
+			mat2_n++;
+			mat2_len += min(t.end - t.beg, q.end - q.beg);
+		}
+	}
+	assert(mat_len == mat2_len);
+	assert(mat_n == mat2_n);
+
+	fprintf(stderr, "  Aligned %d units, delete %d units, insert %d units\n", mat_n, del_n, ins_n);
+	fprintf(stderr, "  Aligned %d bases, delete %d bases, insert %d bases\n", mat_len, del_len, ins_len);
+	fprintf(stderr, "\n");
 }
 
 void align_all_repeats(const ZigOptions &opt,
@@ -1447,7 +1553,7 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	// print_tr_by_order(lr_t,lr_q);
 	// print_tr_by_class(n_class, lr_t, lr_q);
 
-	vector<vector<vector<int>>> matrix;
+	ScoreMatrix matrix;
 	if (opt.dev_label[1] == '1') {
 		matrix = build_score_matrix(opt, n_class, lr_t, len_t, seq_t, lr_q, len_q, seq_q);
 		string matrix_fn = string(opt.log_prefix) + "_matrix.bin";
@@ -1456,9 +1562,10 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 		string matrix_fn = string(opt.log_prefix) + "_matrix.bin";
 		matrix = input_matrix(matrix_fn);
 	}
-	vector<Dp2Profile> profile_t = construct_profile(n_class, lr_t, len_t ,seq_t);
-	vector<Dp2Profile> profile_q = construct_profile(n_class, lr_q, len_q, seq_q);
-	cerr << profile_t.size() << "\t" << profile_q.size() << endl;
+	vector<Dp2Profile> profile_t = construct_profile(opt, n_class, lr_t);
+	vector<Dp2Profile> profile_q = construct_profile(opt, n_class, lr_q);
+
+	alignment_backbone(opt, matrix, profile_t, profile_q);
 	exit(1);
 
 	align_all_repeats(opt, name_t, lr_t, len_t, seq_t, name_q, lr_q, len_q, seq_q);
