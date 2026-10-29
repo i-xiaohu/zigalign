@@ -951,7 +951,6 @@ void output_matrix(const string &fn, const vector<vector<vector<int>>> &matrix)
 		out.write((char*)&n, sizeof(int64_t));
 		out.write((char*)&m, sizeof(int64_t));
 		if (n == 0 or m == 0) continue;
-		fprintf(stderr, "pid=%d, n=%ld, m=%ld\n", pid, n, m);
 		for (int i = 0; i < n; i++) {
 			assert(matrix[pid][i].size() == m);
 			out.write((char*)matrix[pid][i].data(), sizeof(int) * m);
@@ -968,13 +967,11 @@ vector<vector<vector<int>>> input_matrix(const string &fn)
 	size_t n_class;
 	in.read((char*)&n_class, sizeof(int64_t));
 	matrix.resize(n_class);
-	fprintf(stderr, "%ld\n", n_class);
 	for (int pid = 0; pid < n_class; pid++) {
 		size_t n, m;
 		in.read((char*)&n, sizeof(int64_t));
 		in.read((char*)&m, sizeof(int64_t));
 		if (n == 0 or m == 0) continue;
-		fprintf(stderr, "pid=%d, n=%ld, m=%ld\n", pid, n, m);
 		matrix[pid].resize(n);
 		for (int i = 0; i < n; i++) {
 			matrix[pid][i].resize(m);
@@ -983,6 +980,44 @@ vector<vector<vector<int>>> input_matrix(const string &fn)
 	}
 	in.close();
 	return matrix;
+}
+
+struct Dp2Profile
+{
+	int pid; // -1 for SI
+	int idx;
+	int beg, end;
+	Dp2Profile(int p, int i, int b, int e): pid(p), idx(i), beg(b), end(e) {}
+};
+
+vector<Dp2Profile> construct_profile(int n_class, const vector<TandemRepeats> &lr, int len, const char *seq)
+{
+	vector<Dp2Profile> ret;
+	vector<int> cnt(n_class, 0);
+	int os = 0;
+	for (const TandemRepeats &tr: lr) {
+		for (const RepInterval &r: tr.repeats) {
+			int pos = r.beg;
+			for (int i = os; i < pos; i++) {
+				Dp2Profile p(-1, i, i, i+1);
+				ret.push_back(p);
+			}
+			Dp2Profile p(tr.pid, cnt[tr.pid]++, r.beg, r.end);
+			ret.push_back(p);
+			os = r.end;
+		}
+	}
+	for (int i = os; i < len; i++) {
+		Dp2Profile p(-1, i, i, i+1);
+		ret.push_back(p);
+	}
+	assert(ret.front().beg == 0);
+	for (int i = 1; i < ret.size(); i++) {
+		assert(ret[i].beg == ret[i-1].end);
+	}
+	assert(ret.back().end == len);
+
+	return ret;
 }
 
 void align_all_repeats(const ZigOptions &opt,
@@ -1421,6 +1456,9 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 		string matrix_fn = string(opt.log_prefix) + "_matrix.bin";
 		matrix = input_matrix(matrix_fn);
 	}
+	vector<Dp2Profile> profile_t = construct_profile(n_class, lr_t, len_t ,seq_t);
+	vector<Dp2Profile> profile_q = construct_profile(n_class, lr_q, len_q, seq_q);
+	cerr << profile_t.size() << "\t" << profile_q.size() << endl;
 	exit(1);
 
 	align_all_repeats(opt, name_t, lr_t, len_t, seq_t, name_q, lr_q, len_q, seq_q);
