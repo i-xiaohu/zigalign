@@ -34,12 +34,13 @@ int usage(const ZigOptions &o) {
     return 1;
 }
 
+
 int main(int argc, char *argv[]) {
     double ctime = cputime(), rtime = realtime();
     ZigOptions opt;
     if (argc == 1) return usage(opt);
     int c;
-    while ((c = getopt(argc, argv, "A:B:O:E:D:u:d:p:a:b:o:e:k:v:t:")) >= 0) {
+    while ((c = getopt(argc, argv, "A:B:O:E:D:u:d:p:a:b:o:e:k:v:t:@:")) >= 0) {
         switch (c) {
         case 'A':
             opt.mat_score = abs(str2int(optarg));
@@ -85,6 +86,9 @@ int main(int argc, char *argv[]) {
             break;
         case 't':
             opt.n_threads = abs(str2int(optarg));
+            break;
+        case '@':
+            opt.dev_label = optarg;
             break;
         default:
             fprintf(stderr, "Unrecognized option `%c`\n", c);

@@ -31,15 +31,17 @@ struct ZigOptions {
     ScoreParameters si{1, -4, -6, -1};
     // DSI model
     int min_unit_size = 50;
-    int max_unit_size = 5000;
     int open_tr_pen = -12;
     int close_tr_pen = -36;
     ScoreParameters self_aln{1, -1, -4, -1};
     ScoreParameters unit_aln{1, -120, -180, -30};
     int del_unit_pen = -20;
+    int min_reps_cnt = 20;
+    int max_units_del = 40000;
 
     int n_threads = 8;
     const char *log_prefix = nullptr; // Intermediate results
+    string dev_label = "0000"; // Run a stage or input from local files
 
     // ----------------------------------------- //
     // Scoring parameters for repeats in pairwise alignment
