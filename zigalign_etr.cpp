@@ -346,7 +346,7 @@ vector<TandemRepeats> input_repeats(const string &fn)
 }
 
 // Test if group B can be merged into group A
-bool merge_tr_test(const TandemRepeats &tr_a, const char *seq_a, const TandemRepeats &tr_b, const char *seq_b)
+bool merge_tr_test(const ZigOptions &opt, const TandemRepeats &tr_a, const char *seq_a, const TandemRepeats &tr_b, const char *seq_b)
 {
 	// Average length is more reliable
 	double len_diff = abs(tr_a.ave_len - tr_b.ave_len) / tr_a.ave_len;
@@ -369,7 +369,7 @@ bool merge_tr_test(const TandemRepeats &tr_a, const char *seq_a, const TandemRep
 			const RepInterval &a = tr_a.repeats[j];
 			int len_a = a.end - a.beg;
 			// Use semi-global alignment to handle repeat rotations
-			SgResult sg = semi_global(len_a, seq_a + a.beg, sb.length(), sb.data());
+			SgResult sg = semi_global(opt.si, len_a, seq_a + a.beg, sb.length(), sb.data());
 			n_comp++;
 			ave_div += 1.0 * (sg.mis + sg.gap) / len_a;
 		}
@@ -449,7 +449,7 @@ vector<TandemRepeats> collect_long_repeats(const ZigOptions &opt, int n, const c
 					ret.push_back(g);
 				} else {
 					TandemRepeats &t = ret.back();
-					bool to_merge = merge_tr_test(t, seq, g, seq);
+					bool to_merge = merge_tr_test(opt, t, seq, g, seq);
 					if (to_merge) {
 						t.repeats.insert(t.repeats.end(), g.repeats.begin(), g.repeats.end());
 					} else {
@@ -652,8 +652,8 @@ int categorize_repeats(const ZigOptions &opt, vector<TandemRepeats> &lr_t, const
 		const pair<int,int> &p = tasks[i];
 		const TandemRepeats &t = lr_t[p.first];
 		const TandemRepeats &q = lr_q[p.second];
-		bool to_merge = merge_tr_test(t, seq_t, q, seq_q) and
-						merge_tr_test(q, seq_q, t, seq_t);
+		bool to_merge = merge_tr_test(opt, t, seq_t, q, seq_q) and
+						merge_tr_test(opt, q, seq_q, t, seq_t);
 		if (to_merge) {
 			int tid = omp_get_thread_num();
 			link_bin[tid].emplace_back(t.pid, q.pid);
@@ -993,6 +993,7 @@ struct Dp2Profile {
 		aln = -1;
 		del_pen = 0;
 	}
+	Dp2Profile() = default;
 };
 
 vector<Dp2Profile> construct_profile(const ZigOptions &opt, int n_class, const vector<TandemRepeats> &lr)
@@ -1126,397 +1127,132 @@ void alignment_backbone(const ZigOptions &opt, const ScoreMatrix &matrix, vector
 	fprintf(stderr, "\n");
 }
 
-void align_all_repeats(const ZigOptions &opt,
-	const string &name_t, vector<TandemRepeats> &lr_t, int t_len, const char *t_seq,
-	const string &name_q, vector<TandemRepeats> &lr_q, int q_len, const char *q_seq)
+void output_profile(const string &fn, const vector<Dp2Profile> &pro_t, const vector<Dp2Profile> &pro_q)
 {
-	int n = 0, m = 0;
-	int t_sum = 0, q_sum = 0;
-	for (TandemRepeats &lr: lr_t) {
-		lr.base_idx = n;
-		n += lr.repeats.size();
-		for (const RepInterval &r: lr.repeats) {
-			t_sum += r.end - r.beg;
+	ofstream out(fn);
+	assert(out.is_open());
+	int64_t n = pro_t.size();
+	out.write((char*)&n, sizeof(int64_t));
+	out.write((char*) pro_t.data(), n * sizeof(Dp2Profile));
+	n = pro_q.size();
+	out.write((char*)&n, sizeof(int64_t));
+	out.write((char*) pro_q.data(), n * sizeof(Dp2Profile));
+	out.close();
+}
+
+void input_profile(const string &fn, vector<Dp2Profile> &pro_t, vector<Dp2Profile> &pro_q)
+{
+	ifstream in(fn);
+	assert(in.is_open());
+	int64_t n;
+	in.read((char*)&n, sizeof(int64_t));
+	pro_t.resize(n);
+	in.read((char*)pro_t.data(), n * sizeof(Dp2Profile));
+	in.read((char*)&n, sizeof(int64_t));
+	pro_q.resize(n);
+	in.read((char*)pro_q.data(), n * sizeof(Dp2Profile));
+	in.close();
+}
+
+struct GapAndUnit {
+	bool si_gap;
+	string seq_t, seq_q;
+	vector<Dp2Profile> del_t, del_q;
+	Dp2Profile aln_t, aln_q;
+	string ext_t, ext_q; // Alignment result
+	GapAndUnit(bool gap): si_gap(gap), aln_t(), aln_q() {}
+};
+
+void fill_SI_gap(const ZigOptions &opt,
+	int t_len, const char *t_seq, vector<Dp2Profile> &pro_t,
+	int q_len, const char *q_seq, vector<Dp2Profile> &pro_q)
+{
+	vector<Dp2Profile> aln_t, aln_q, del_t, del_q;
+	for (const Dp2Profile &p: pro_t) {
+		if (p.aln == -1) del_t.push_back(p);
+		else {
+			aln_t.push_back(p);
+			aln_q.push_back(pro_q[p.aln]);
 		}
 	}
-	for (TandemRepeats &lr: lr_q) {
-		lr.base_idx = m;
-		m += lr.repeats.size();
-		for (const RepInterval &r: lr.repeats) {
-			q_sum += r.end - r.beg;
-		}
-	}
-	fprintf(stderr, "T: %d repeats, fraction=%.2f %%\n", n, 100.0 * t_sum / t_len);
-	fprintf(stderr, "Q: %d repeats, fraction=%.2f %%\n", m, 100.0 * q_sum / q_len);
-
-	// Build score matrix of repeat units
-	double t_cpu = cputime(), t_real = realtime();
-	vector<vector<int>> matrix(n); // FIXME: memory inefficient for this sparse matrix
-	for (int i = 0; i < n; i++) matrix[i].resize(m, -INF);
-	for (const TandemRepeats &tr_t : lr_t) {
-		int idx_t = tr_t.base_idx;
-		int pid_t = tr_t.pid;
-		for (const TandemRepeats &tr_q : lr_q) {
-			int idx_q = tr_q.base_idx;
-			int pid_q = tr_q.pid;
-			if (pid_q != pid_t) continue;
-
-			#pragma omp parallel for
-			for (int i = 0; i < tr_t.repeats.size(); i++) {
-				const RepInterval &t = tr_t.repeats[i];
-				for (int j = 0; j < tr_q.repeats.size(); j++) {
-					const RepInterval &q = tr_q.repeats[j];
-					matrix[idx_t + i][idx_q + j] = global_alignment(
-						opt.unit_aln, t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
-				}
-			}
-		}
-	}
-	fprintf(stderr, "Build scoring matrix: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
-
-	// TODO: set the penalty of deleting units
-	// sqrt(2 * L * max_div * mis_penalty)
-	t_cpu = cputime(); t_real = realtime();
-	const int DEL_UNIT = opt.del_unit_pen;
-	const int VERTICAL = 1;
-	const int HORIZONTAL = 2;
-	const int DIAGONAL = 3;
-	vector<vector<int>> dp(n + 1);
-	vector<vector<uint8_t>> bt(n + 1);
-	for (int i = 0; i <= n; i++) {
-		dp[i].resize(m + 1, -INF);
-		bt[i].resize(m + 1, 0);
-	}
-	dp[0][0] = 0;
-	for (int j = 1; j <= m; j++) {
-		dp[0][j] = DEL_UNIT * j;
-	}
-	for (int i = 1; i <= n; i++) {
-		dp[i][0] = DEL_UNIT * i;
-		for (int j = 1; j <= m; j++) {
-			int v = dp[i-1][j] + DEL_UNIT;
-			int h = dp[i][j-1] + DEL_UNIT;
-			int d = dp[i-1][j-1] + matrix[i-1][j-1];
-			if (v > dp[i][j]) {
-				dp[i][j] = v;
-				bt[i][j] = VERTICAL;
-			}
-			if (h > dp[i][j]) {
-				dp[i][j] = h;
-				bt[i][j] = HORIZONTAL;
-			}
-			if (d > dp[i][j]) {
-				dp[i][j] = d;
-				bt[i][j] = DIAGONAL;
-			}
-		}
-	}
-	fprintf(stderr, "DP: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
-
-	// Construct alignment topology
-	t_cpu = cputime(); t_real = realtime();
-	vector<pair<int,int>> aln;
-	vector<int> t_del;
-	vector<int> q_del;
-	int pi = n, pj = m;
-	while (bt[pi][pj] != 0) {
-		switch (bt[pi][pj]) {
-		case DIAGONAL:
-			pi--;
-			pj--;
-			aln.emplace_back(make_pair(pi, pj));
-			break;
-		case VERTICAL:
-			pi--;
-			t_del.push_back(pi);
-			break;
-		case HORIZONTAL:
-			pj--;
-			q_del.push_back(pj);
-			break;
-		default:
-			break;
-		}
-	}
-	reverse(aln.begin(), aln.end());
-	reverse(t_del.begin(), t_del.end());
-	reverse(q_del.begin(), q_del.end());
-
-	int aln_len = 0, t_del_len = 0, q_del_len = 0;
-	FILE *fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_aln.tsv").c_str(), "w") :nullptr;
-	if (fo) {
-		fprintf(fo, "%s\t%s\t%s\t%s\t", "t_id", "t_beg", "t_end", "t_len");
-		fprintf(fo, "%s\t%s\t%s\t%s\t", "q_id", "q_beg", "q_end", "q_len");
-		fprintf(fo, "%s\t%s\t%s\n", "match", "mismatch", "gap");
-	}
-	vector<RepInterval> agg_t;
-	for (const TandemRepeats &lr: lr_t) {
-		agg_t.insert(agg_t.end(), lr.repeats.begin(), lr.repeats.end());
-	}
-	vector<RepInterval> agg_q;
-	for (const TandemRepeats &lr: lr_q) {
-		agg_q.insert(agg_q.end(), lr.repeats.begin(), lr.repeats.end());
+	for (const Dp2Profile &p: pro_q) {
+		if (p.aln == -1) del_q.push_back(p);
 	}
 
-	vector<int> rep_id_map(t_len + 1, -1);
-	for (const auto &lr :lr_t) {
-		for (const auto &r: lr.repeats) {
-			rep_id_map[r.beg] = lr.pid; // Mark the position one base before the repeat
-		}
-	}
-
-	AlnSta mut; // Small mutations
-	for (const pair<int,int> &p: aln) {
-		int i = p.first, j = p.second;
-		const RepInterval &t = agg_t[i];
-		const RepInterval &q = agg_q[j];
-		aln_len += min(t.end - t.beg, q.end - q.beg);
-		AlnSta res = global_cigar(opt, t.end - t.beg, t_seq + t.beg, q.end - q.beg, q_seq + q.beg);
-		mut += res;
-		if (fo) {
-			fprintf(fo, "%d\t%d\t%d\t%d\t", i, t.beg, t.end, t.end - t.beg);
-			fprintf(fo, "%d\t%d\t%d\t%d\t", j, q.beg, q.end, q.end - q.beg);
-			fprintf(fo, "%d\t%d\t%d\n", res.match, res.mismatch, res.ins + res.del);
-		}
-	}
-	if (fo) fclose(fo);
-
-	double mut_rate = 100.0 * (mut.mismatch + mut.ins + mut.del) / aln_len;
-	fprintf(stderr, "Alignment between repeats:\n");
-	fprintf(stderr, "    aligned length: %d, map ratio: %.2f %%\n", aln_len, 100.0 * aln_len / min(t_len, q_len));
-	fprintf(stderr, "    matches: %d, mismatches: %d, insertions: %d, deletions: %d, mutation rate: %.2f %%\n",
-		mut.match, mut.mismatch, mut.ins, mut.del, mut_rate);
-
-	// Target deletion
-	fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_t_del.tsv").c_str(), "w") :nullptr;
-	if (fo) fprintf(fo, "%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len");
-	for (int i: t_del) {
-		const RepInterval &t = agg_t[i];
-		if (fo) fprintf(fo, "%d\t%d\t%d\t%d\n", i, t.beg, t.end, t.end - t.beg);
-		t_del_len += t.end - t.beg;
-	}
-	if (fo) fclose(fo);
-	fprintf(stderr, "    target deletion length: %d, percentage: %.2f %%\n", t_del_len, 100.0 * t_del_len / t_len);
-
-	// Query deletion
-	fo = opt.log_prefix ? fopen((string(opt.log_prefix) + "_q_del.tsv").c_str(), "w") :nullptr;
-	if (fo) fprintf(fo, "%s\t%s\t%s\t%s\n", "ID", "beg", "end", "len");
-	for (int j: q_del) {
-		const RepInterval &q = agg_q[j];
-		if (fo) fprintf(fo, "%d\t%d\t%d\t%d\n", j, q.beg, q.end, q.end - q.beg);
-		q_del_len += q.end - q.beg;
-	}
-	if (fo) fclose(fo);
-	fprintf(stderr, "    query deletion length: %d, percentage: %.2f %%\n", q_del_len, 100.0 * q_del_len / q_len);
-
-	fprintf(stderr, "Construct topology: %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
-
-	// Finalizing the alignment
-	vector<RepInterval> aln_t, aln_q;
-	vector<RepInterval> del_t, del_q;
-	for (auto &pair: aln) {
-		aln_t.push_back(agg_t[pair.first]);
-		aln_q.push_back(agg_q[pair.second]);
-	}
-	for (int i: t_del) {
-		del_t.push_back(agg_t[i]);
-	}
-	for (int i: q_del) {
-		del_q.push_back(agg_q[i]);
-	}
-
-	{
-		for (int i = 1; i < aln_t.size(); i++) {
-			assert(aln_t[i].beg >= aln_t[i-1].end);
-			assert(aln_q[i].beg >= aln_q[i-1].end);
-		}
-		for (int i = 1; i < del_t.size(); i++) {
-			assert(del_t[i].end >= del_t[i-1].beg);
-		}
-		for (int i = 1; i < del_q.size(); i++) {
-			assert(del_q[i].end >= del_q[i-1].beg);
-		}
-	}
-
-	string final_ct, final_cq;
+	vector<GapAndUnit> tasks;
 	int jt = 0, jq = 0;
-	int long_gap_cnt = 0;
-	for (int i = 0; i <= aln_q.size(); i++) {
-		int t_beg = i == 0 ?0 :aln_t[i-1].end, t_end = i == aln_q.size() ?t_len :aln_t[i].beg;
-		int q_beg = i == 0 ?0 :aln_q[i-1].end, q_end = i == aln_q.size() ?q_len :aln_q[i].beg;
-		int gap_t_len = t_end - t_beg, gap_q_len = q_end - q_beg;
-		// fprintf(stderr, "[%d,%d) t_len=%d -> [%d,%d) q_len=%d\n", t_beg, t_end, len_t, q_beg, q_end, len_q);
+	for (int i = 0; i <= aln_t.size(); i++) {
+		int gap_t_beg = i == 0 ?0 :aln_t[i-1].end, gap_t_end = i == aln_q.size() ?t_len :aln_t[i].beg;
+		int gap_q_beg = i == 0 ?0 :aln_q[i-1].end, gap_q_end = i == aln_q.size() ?q_len :aln_q[i].beg;
 
-		// Find deleted segments within the gap
-		vector<RepInterval> sub_t;
+		// Deleted units within the gap
+		GapAndUnit gap(true);
+		int last_pos = gap_t_beg;
 		for (; jt < del_t.size(); jt++) {
 			int b = del_t[jt].beg, e = del_t[jt].end;
-			if (b >= t_beg and e <= t_end) {
-				RepInterval x = del_t[jt];
-				x.beg -= t_beg;
-				x.end -= t_beg;
-				sub_t.push_back(x);
-			} else if (b >= t_end) {
+			if (b >= gap_t_beg and e <= gap_t_end) {
+				for (int j = last_pos; j < b; j++) gap.seq_t.push_back(t_seq[j]);
+				gap.seq_t.push_back(UNIT_SI_CHAR);
+				Dp2Profile x = del_t[jt];
+				gap.del_t.push_back(x);
+				last_pos = x.end;
+			} else if (b >= gap_t_end) {
 				break;
 			}
 		}
-		vector<RepInterval> sub_q;
+		for (int j = last_pos; j < gap_t_end; j++) {
+			gap.seq_t.push_back(t_seq[j]);
+		}
+
+		last_pos = gap_q_beg;
 		for (; jq < del_q.size(); jq++) {
 			int b = del_q[jq].beg, e = del_q[jq].end;
-			if (b >= q_beg and e <= q_end) {
-				RepInterval x = del_q[jq];
-				x.beg -= q_beg;
-				x.end -= q_beg;
-				sub_q.push_back(x);
-			} else if (b >= q_end) {
+			if (b >= gap_q_beg and e <= gap_q_end) {
+				for (int j = last_pos; j < b; j++) gap.seq_q.push_back(q_seq[j]);
+				gap.seq_q.push_back(UNIT_SI_CHAR);
+				Dp2Profile x = del_q[jq];
+				gap.del_q.push_back(x);
+				last_pos = x.end;
+			} else if (b >= gap_q_end) {
 				break;
 			}
 		}
-		// Caution: deletion-insertion runs might be caused by inaccurate partitioning
-
-		// Collect the left segments
-		string left_t;
-		vector<int> map_t;
-		const char *st = t_seq + t_beg;
-		for (int j = 0; j <= sub_t.size(); j++) {
-			int b = (j == 0) ?0 :sub_t[j-1].end;
-			int e = (j == sub_t.size()) ?gap_t_len :sub_t[j].beg;
-			for (int k = b; k < e; k++) {
-				left_t.push_back(st[k]);
-				map_t.push_back(k);
-			}
+		for (int j = last_pos; j < gap_q_end; j++) {
+			gap.seq_q.push_back(q_seq[j]);
 		}
-		left_t.push_back('$'); // Guard
-		map_t.push_back(gap_t_len);
-
-		string left_q;
-		vector<int> map_q;
-		const char *sq = q_seq + q_beg;
-		for (int j = 0; j <= sub_q.size(); j++) {
-			int b = (j == 0) ?0 :sub_q[j-1].end;
-			int e = (j == sub_q.size()) ?gap_q_len :sub_q[j].beg;
-			for (int k = b; k < e; k++) {
-				left_q.push_back(sq[k]);
-				map_q.push_back(k);
-			}
-		}
-		left_q.push_back('$');
-		map_q.push_back(gap_q_len);
-
-		// Be careful with long gaps
-		if (left_t.length() > 5000 or left_q.length() > 5000) {
-			long_gap_cnt++;
+		if (not gap.seq_t.empty() or not gap.seq_q.empty()) {
+			tasks.push_back(gap);
 		}
 
-		// FIXME: use SI scoring matrix
-		AlnSta as = global_cigar(opt, left_t.length(), left_t.data(), left_q.length(), left_q.data());
-		const string &ext_t = as.ext_a;
-		const string &ext_q = as.ext_b;
-
-		int last_t = 0, last_q = 0;
-		int pnt_t = 0, pnt_q = 0;
-		assert(final_ct.size() == final_cq.size());
-		int kt = 0, kq = 0;
-		for (int j = 0; j < ext_t.length(); j++) {
-			if (ext_t[j] != '-') {
-				assert(ext_t[j] == left_t[pnt_t]);
-				int pos_t = map_t[pnt_t];
-				if (ext_t[j] != '$') assert(ext_t[j] == st[pos_t]);
-				// Duplication deletions between bases
-				for (; kt < sub_t.size(); kt++) {
-					int b = sub_t[kt].beg, e = sub_t[kt].end;
-					if (b >= last_t and e <= pos_t) {
-						final_ct.push_back('[');
-						final_cq.push_back('[');
-						for (int c = b; c < e; c++) {
-							final_ct.push_back(st[c]);
-							final_cq.push_back('-');
-						}
-						final_ct.push_back(']');
-						final_cq.push_back(']');
-					} else if (b >= pos_t) break;
-				}
-				last_t = pos_t;
-				pnt_t++;
-			}
-			if (ext_q[j] != '-') {
-				assert(ext_q[j] == left_q[pnt_q]);
-				int pos_q = map_q[pnt_q];
-				if (ext_q[j] != '$') assert(ext_q[j] == sq[pos_q]);
-				for (; kq < sub_q.size(); kq++) {
-					int b = sub_q[kq].beg, e = sub_q[kq].end;
-					if (b >= last_q and e <= pos_q) {
-						final_ct.push_back('[');
-						final_cq.push_back('[');
-						for (int c = b; c < e; c++) {
-							final_ct.push_back('-');
-							final_cq.push_back(sq[c]);
-						}
-						final_ct.push_back(']');
-						final_cq.push_back(']');
-					} else if (b >= pos_q) break;
-				}
-				last_q = pos_q;
-				pnt_q++;
-			}
-			if (ext_t[j] != '$') final_ct.push_back(ext_t[j]);
-			if (ext_q[j] != '$') final_cq.push_back(ext_q[j]);
-		}
-		assert(final_cq.size() == final_ct.size());
-
-		if (i < aln_q.size()) {
-			as = global_cigar(opt, aln_t[i].end - aln_t[i].beg, t_seq + aln_t[i].beg,
-				aln_q[i].end - aln_q[i].beg, q_seq + aln_q[i].beg);
-			final_ct.push_back('[');
-			final_ct += as.ext_a;
-			final_ct.push_back(']');
-			final_cq.push_back('[');
-			final_cq += as.ext_b;
-			final_cq.push_back(']');
+		if (i < aln_t.size()) {
+			GapAndUnit unit(false);
+			unit.aln_t = aln_t[i];
+			unit.aln_q = aln_q[i];
+			tasks.push_back(unit);
 		}
 	}
-	fprintf(stderr, "Found %d long gaps\n", long_gap_cnt);
 
-	// Sanity check
-	int i = 0;
-	for (char c: final_ct) {
-		if (c == '[' or c == ']' or c == '-') {
-			continue;
+	const int MAX_BW = 20000;
+	AlnSta si_sum, dsi_sum;
+	for (GapAndUnit &g: tasks) {
+		if (g.si_gap) {
+			AlnSta as = global_cigar(opt.si, g.seq_t.length(), g.seq_t.data(), g.seq_q.length(), g.seq_q.data(), MAX_BW);
+			g.ext_t = as.ext_a;
+			g.ext_q = as.ext_b;
+			si_sum += as;
+		} else {
+			const char *t = t_seq + g.aln_t.beg, *q = q_seq + g.aln_q.beg;
+			int n = g.aln_t.end - g.aln_t.beg, m = g.aln_q.end - g.aln_q.beg;
+			AlnSta as = global_cigar(opt.si, n, t, m, q, MAX_BW);
+			g.ext_t = as.ext_a;
+			g.ext_q = as.ext_b;
+			dsi_sum += as;
 		}
-		assert(c == t_seq[i++]);
 	}
-	assert(i == t_len);
+	fprintf(stderr, "Final alignment:\n");
+	fprintf(stderr, "DSI: %d mat, %d mis, %d ins and %d del\n",
+		dsi_sum.mat, dsi_sum.mis, dsi_sum.ins, dsi_sum.del);
 
-	i = 0;
-	for (char c: final_cq) {
-		if (c == '[' or c == ']' or c == '-') {
-			continue;
-		}
-		assert(c == q_seq[i++]);
-	}
-	assert(i == q_len);
-
-	// fprintf(stdout, "%s\n", final_ct.data());
-	// fprintf(stdout, "%s\n", final_cq.data());
-
-	int cnt_mat = 0, cnt_mis = 0, cnt_del = 0, cnt_ins = 0;
-	for (i = 0; i < final_ct.length(); i++) {
-		if (final_ct[i] == '-') cnt_ins++;
-		else if (final_cq[i] == '-') cnt_del++;
-		else if (final_cq[i] == final_ct[i]) cnt_mat++;
-		else cnt_mis++;
-	}
-
-	fprintf(stderr, "Finalized alignment: ");
-	int cnt_aln = cnt_mis + cnt_mat;
-	fprintf(stderr, "    aligned length: %d, map ratio: %.2f %%\n", cnt_aln, 100.0 * cnt_aln / min(t_len, q_len));
-	fprintf(stderr, "    mismatch: %d, percentage: %.2f %%\n", cnt_mis, 100.0 * cnt_mis / cnt_aln);
-	fprintf(stderr, "    deletion: %d, percentage: %.2f %%\n", cnt_del, 100.0 * cnt_del / t_len);
-	fprintf(stderr, "    insertion: %d, percentage: %.2f %%\n", cnt_ins, 100.0 * cnt_ins / q_len);
-	fprintf(stderr, "\n");
-
-	// Output CIGAR
-	extended_paf_format(name_t, t_len, final_ct, name_q, q_len, final_cq, rep_id_map);
 }
 
 void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
@@ -1558,15 +1294,22 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 		matrix = build_score_matrix(opt, n_class, lr_t, len_t, seq_t, lr_q, len_q, seq_q);
 		string matrix_fn = string(opt.log_prefix) + "_matrix.bin";
 		output_matrix(matrix_fn, matrix);
-	} else {
+	} else if (opt.dev_label[1] == '0') {
 		string matrix_fn = string(opt.log_prefix) + "_matrix.bin";
 		matrix = input_matrix(matrix_fn);
 	}
-	vector<Dp2Profile> profile_t = construct_profile(opt, n_class, lr_t);
-	vector<Dp2Profile> profile_q = construct_profile(opt, n_class, lr_q);
 
-	alignment_backbone(opt, matrix, profile_t, profile_q);
-	exit(1);
+	vector<Dp2Profile> profile_t, profile_q;
+	if (opt.dev_label[2] == '1') {
+		profile_t = construct_profile(opt, n_class, lr_t);
+		profile_q = construct_profile(opt, n_class, lr_q);
+		alignment_backbone(opt, matrix, profile_t, profile_q);
+		string profile_fn = string(opt.log_prefix) + "_profile.bin";
+		output_profile(profile_fn, profile_t, profile_q);
+	} else {
+		string profile_fn = string(opt.log_prefix) + "_profile.bin";
+		input_profile(profile_fn, profile_t, profile_q);
+	}
 
-	align_all_repeats(opt, name_t, lr_t, len_t, seq_t, name_q, lr_q, len_q, seq_q);
+	fill_SI_gap(opt, len_t, seq_t, profile_t, len_q, seq_q, profile_q);
 }

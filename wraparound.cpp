@@ -43,15 +43,132 @@ int global_alignment(const ScoreParameters &sp, int n, const char *a, int m, con
     return ret;
 }
 
+AlnSta global_cigar(const ScoreParameters &sp, int n, const char *a, int m, const char *b, int bw)
+{
+	const int MAT_S = sp.mat;
+	const int MIS_P = sp.mis;
+	const int GAP_O = sp.gap_o;
+	const int GAP_E = sp.gap_e;
+
+	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
+	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
+	prev_H[0] = 0;
+	for (int i = 1; i <= m; i++) prev_H[i] = prev_E[i] = GAP_O + i * GAP_E;
+	vector<vector<uint8_t>> bt(n + 1);
+	for (int i = 0; i <= n; i++) bt[i].resize(m + 1, 0);
+	for (int j = 1; j <= m; j++) bt[0][j] = BT_HORIZONTAL;
+	for (int i = 1; i <= n; i++) bt[i][0] = BT_VERTICAL;
+
+	int beg = 1, end = m;
+	for (int i = 1; i <= n; i++) {
+		beg = max(1, i - bw);
+		end = min(m, i + bw);
+		if (beg > end) {
+			// Band moves out of the matrix from the right side
+			assert(end == m);
+			for (int k = i; k <= n; k++) bt[k][m] = BT_VERTICAL;
+			break;
+		}
+		if (beg == 1) curr_H[beg-1] = GAP_O + i * GAP_E;
+		else curr_H[beg-1] = -INF;
+		int F = -INF;
+		int max_score = -INF;
+		for (int j = beg; j <= end; j++) {
+			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
+			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
+			if (F > curr_E[j]) {
+				curr_H[j] = F;
+				bt[i][j] = BT_HORIZONTAL;
+			} else {
+				curr_H[j] = curr_E[j];
+				bt[i][j] = BT_VERTICAL;
+			}
+			if (a[i-1] != UNIT_SI_CHAR and b[j-1] != UNIT_SI_CHAR) {
+				int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
+				if (M > curr_H[j]) {
+					curr_H[j] = M;
+					bt[i][j] = BT_DIAGONAL;
+				}
+			}
+			max_score = max(max_score, curr_H[j]);
+		}
+		if (end < m) curr_H[end+1] = curr_E[end+1] = -INF;
+		assert(max_score > -INF);
+		if (max_score == -INF) break;
+
+		swap(prev_H, curr_H);
+		swap(prev_E, curr_E);
+	}
+	if (end < m) {
+		// Band didn't reach the bottom-right corner
+		for (int j = end+1; j <= m; j++) bt[n][j] = BT_HORIZONTAL;
+	}
+
+	AlnSta ret;
+	int pi = n, pj = m;
+	while (bt[pi][pj] != 0) {
+		switch (bt[pi][pj]) {
+		case BT_DIAGONAL:
+			pi--;
+			pj--;
+			if (a[pi] == b[pj]) ret.mat++;
+			else ret.mis++;
+			ret.ext_a += a[pi];
+			ret.ext_b += b[pj];
+			break;
+		case BT_VERTICAL:
+			pi--;
+			ret.del++;
+			ret.ext_a += a[pi];
+			ret.ext_b += '-';
+			break;
+		case BT_HORIZONTAL:
+			pj--;
+			ret.ins++;
+			ret.ext_a += '-';
+			ret.ext_b += b[pj];
+			break;
+		default:
+			break;
+		}
+	}
+	assert(pi == 0 and pj == 0);
+	reverse(ret.ext_a.begin(), ret.ext_a.end());
+	reverse(ret.ext_b.begin(), ret.ext_b.end());
+
+	// Sanity check
+	{
+		assert(ret.ext_a.length() == ret.ext_b.length());
+		int i = 0;
+		for (char c: ret.ext_a) {
+			if (c != '-') {
+				assert(c == a[i++]);
+			}
+		}
+		assert(i == n);
+
+		i = 0;
+		for (char c: ret.ext_b) {
+			if (c != '-') {
+				assert(c == b[i++]);
+			}
+		}
+		assert(i == m);
+
+		for (i = 0; i < ret.ext_a.length(); i++) {
+			if (ret.ext_a[i] == UNIT_SI_CHAR) assert(ret.ext_b[i] == '-');
+			if (ret.ext_b[i] == UNIT_SI_CHAR) assert(ret.ext_a[i] == '-');
+		}
+	}
+	return ret;
+}
+
 GlobalResult global_cigar2(const ScoreParameters &sp, int bw, int n, const char *a, int m, const char *b)
 {
 	const int MAT_S = sp.mat;
 	const int MIS_P = sp.mis;
 	const int GAP_O = sp.gap_o;
 	const int GAP_E = sp.gap_e;
-	const int VERTICAL = 1;
-	const int HORIZONTAL = 2;
-	const int DIAGONAL = 3;
 
 	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
 	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
@@ -77,14 +194,14 @@ GlobalResult global_cigar2(const ScoreParameters &sp, int bw, int n, const char 
 			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
 			if (F > M) {
 				curr_H[j] = F;
-				bt[i][j] = HORIZONTAL;
+				bt[i][j] = BT_HORIZONTAL;
 			} else {
 				curr_H[j] = M;
-				bt[i][j] = DIAGONAL;
+				bt[i][j] = BT_DIAGONAL;
 			}
 			if (curr_E[j] > curr_H[j]) {
 				curr_H[j] = curr_E[j];
-				bt[i][j] = VERTICAL;
+				bt[i][j] = BT_VERTICAL;
 			}
 			max_score = max(max_score, curr_H[j]);
 		}
@@ -103,17 +220,17 @@ GlobalResult global_cigar2(const ScoreParameters &sp, int bw, int n, const char 
 	int pi = n, pj = m;
 	while (bt[pi][pj] != 0) {
 		switch (bt[pi][pj]) {
-		case DIAGONAL:
+		case BT_DIAGONAL:
 			pi--;
 			pj--;
 			if (a[pi] == b[pj]) ret.mat++;
 			else ret.mis++;
 			break;
-		case VERTICAL:
+		case BT_VERTICAL:
 			pi--;
 			ret.gap++;
 			break;
-		case HORIZONTAL:
+		case BT_HORIZONTAL:
 			pj--;
 			ret.gap++;
 			break;
@@ -134,7 +251,7 @@ struct WdpCell {
 	}
 };
 
-vector<RepInterval> wraparound_dp(const int pat_len, const char *pat_seq, const int que_len, const char *que_seq)
+vector<RepInterval> wraparound_dp(int pat_len, const char *pat_seq, int que_len, const char *que_seq)
 {
 	// Classical SI score matrix
 	const int MAT_S = 1;
@@ -274,16 +391,12 @@ vector<RepInterval> wraparound_dp(const int pat_len, const char *pat_seq, const 
 }
 
 // Banding is not applicable
-SgResult semi_global(const int n, const char *a, const int m, const char *b)
+SgResult semi_global(const ScoreParameters &sc, int n, const char *a, int m, const char *b)
 {
-	// Classical SI score matrix
-	const int MAT_S = 1;
-	const int MIS_P = -4;
-	const int GAP_O = -6;
-	const int GAP_E = -1;
-	const int VERTICAL = 1;
-	const int HORIZONTAL = 2;
-	const int DIAGONAL = 3;
+	const int MAT_S = sc.mat;
+	const int MIS_P = sc.mis;
+	const int GAP_O = sc.gap_o;
+	const int GAP_E = sc.gap_e;
 
 	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
 	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
@@ -304,14 +417,14 @@ SgResult semi_global(const int n, const char *a, const int m, const char *b)
 			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
 			if (F > M) {
 				curr_H[j] = F;
-				bt[i][j] = HORIZONTAL;
+				bt[i][j] = BT_HORIZONTAL;
 			} else {
 				curr_H[j] = M;
-				bt[i][j] = DIAGONAL;
+				bt[i][j] = BT_DIAGONAL;
 			}
 			if (curr_E[j] > curr_H[j]) {
 				curr_H[j] = curr_E[j];
-				bt[i][j] = VERTICAL;
+				bt[i][j] = BT_VERTICAL;
 			}
 		}
 		swap(prev_H, curr_H);
@@ -329,16 +442,16 @@ SgResult semi_global(const int n, const char *a, const int m, const char *b)
 	int pi = n, pj = ret.end;
 	while (bt[pi][pj] != 0) {
 		switch (bt[pi][pj]) {
-		case DIAGONAL:
+		case BT_DIAGONAL:
 			pi--;
 			pj--;
 			ret.mis += (a[pi] != b[pj]);
 			break;
-		case VERTICAL:
+		case BT_VERTICAL:
 			pi--;
 			ret.gap++;
 			break;
-		case HORIZONTAL:
+		case BT_HORIZONTAL:
 			pj--;
 			ret.gap++;
 			break;
@@ -348,123 +461,5 @@ SgResult semi_global(const int n, const char *a, const int m, const char *b)
 	}
 	ret.gap += pi;
 	ret.beg = pj; // 0-based closed
-	return ret;
-}
-
-// Banded alignment is not used
-AlnSta global_cigar(const ZigOptions &opt, const int n, const char *a, const int m, const char *b)
-{
-	const int UNIT_MAT_S = opt.mat_score;
-	const int UNIT_MIS_P = opt.mis_pen;
-	const int UNIT_GAP_O = opt.gap_o;
-	const int UNIT_GAP_E = opt.gap_e;
-	const int VERTICAL = 1;
-	const int HORIZONTAL = 2;
-	const int DIAGONAL = 3;
-
-	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
-	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
-	prev_H[0] = 0;
-	for (int i = 1; i <= m; i++) {
-		prev_H[i] = prev_E[i] = UNIT_GAP_O + i * UNIT_GAP_E;
-	}
-	vector<vector<uint8_t>> bt(n + 1);
-	for (int i = 0; i <= n; i++) {
-		bt[i].resize(m + 1, 0);
-	}
-
-	for (int i = 1; i <= n; i++) {
-		int beg = 1, end = m;
-		if (beg == 1) curr_H[beg-1] = UNIT_GAP_O + i * UNIT_GAP_E;
-		else curr_H[beg-1] = -INF;
-		int F = -INF;
-		int max_score = -INF;
-		for (int j = beg; j <= end; j++) {
-			F = max(F, curr_H[j-1] + UNIT_GAP_O) + UNIT_GAP_E;
-			curr_E[j] = max(prev_E[j], prev_H[j] + UNIT_GAP_O) + UNIT_GAP_E;
-			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?UNIT_MAT_S :UNIT_MIS_P);
-			if (F > M) {
-				curr_H[j] = F;
-				bt[i][j] = HORIZONTAL;
-			} else {
-				curr_H[j] = M;
-				bt[i][j] = DIAGONAL;
-			}
-			if (curr_E[j] > curr_H[j]) {
-				curr_H[j] = curr_E[j];
-				bt[i][j] = VERTICAL;
-			}
-			max_score = max(max_score, curr_H[j]);
-		}
-		if (end < m) curr_H[end+1] = curr_E[end+1] = -INF;
-		if (max_score == -INF) break;
-
-		swap(prev_H, curr_H);
-		swap(prev_E, curr_E);
-	}
-
-	assert(prev_H[m] != -INF);
-
-	AlnSta ret;
-	int pi = n, pj = m;
-	while (bt[pi][pj] != 0) {
-		switch (bt[pi][pj]) {
-		case DIAGONAL:
-			pi--;
-			pj--;
-			if (a[pi] == b[pj]) ret.match++;
-			else ret.mismatch++;
-			ret.ext_a += a[pi];
-			ret.ext_b += b[pj];
-			break;
-		case VERTICAL:
-			pi--;
-			ret.del++;
-			ret.ext_a += a[pi];
-			ret.ext_b += '-';
-			break;
-		case HORIZONTAL:
-			pj--;
-			ret.ins++;
-			ret.ext_a += '-';
-			ret.ext_b += b[pj];
-			break;
-		default:
-			break;
-		}
-	}
-	// Be careful with the preceding gaps, which are introduced by wrong splitting
-	ret.ins += pi;
-	while (pi > 0) {
-		ret.ext_a += a[--pi];
-		ret.ext_b += '-';
-	}
-	ret.del += pj;
-	while (pj > 0) {
-		ret.ext_a += '-';
-		ret.ext_b += b[--pj];
-	}
-	reverse(ret.ext_a.begin(), ret.ext_a.end());
-	reverse(ret.ext_b.begin(), ret.ext_b.end());
-
-	// Sanity check
-	{
-		assert(ret.ext_a.length() == ret.ext_b.length());
-		int i = 0;
-		for (char c: ret.ext_a) {
-			if (c != '-') {
-				assert(c == a[i++]);
-			}
-		}
-		assert(i == n);
-
-		i = 0;
-		for (char c: ret.ext_b) {
-			if (c != '-') {
-				assert(c == b[i++]);
-			}
-		}
-		assert(i == m);
-	}
 	return ret;
 }
