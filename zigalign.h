@@ -40,6 +40,7 @@ struct ZigOptions {
     int max_units_del = 40000;
 
     int n_threads = 8;
+    char cigar_neq = false; // True if cigar includes =X instead of M
     const char *log_prefix = nullptr; // Intermediate results
     string dev_label = "0000"; // Run a stage or input from local files
 

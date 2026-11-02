@@ -1154,6 +1154,58 @@ void input_profile(const string &fn, vector<Dp2Profile> &pro_t, vector<Dp2Profil
 	in.close();
 }
 
+struct CigarExt
+{
+	int pid; // -1 for SI region
+	vector<char> op;
+	vector<int> num;
+};
+
+CigarExt parse_aligned_seq(int n, const char *a, const char *b, bool neq)
+{
+	CigarExt ret;
+	char prev_op = '@';
+	int cnt = 0;
+	for (int i = 0; i < n; i++) {
+		char curr_op;
+		if (a[i] == '-') {
+			curr_op = 'I';
+		} else if (b[i] == '-') {
+			curr_op = 'D';
+		} else {
+			if (neq) {
+				if (a[i] == b[i]) curr_op = '=';
+				else curr_op = 'X';
+			} else {
+				curr_op = 'M';
+			}
+		}
+		if (prev_op != '@' and curr_op != prev_op) {
+			ret.op.push_back(prev_op);
+			ret.num.push_back(cnt);
+			cnt = 0;
+		}
+		cnt++;
+		prev_op = curr_op;
+	}
+	ret.op.push_back(prev_op);
+	ret.num.push_back(cnt);
+	return ret;
+}
+
+void move_pointer(int &pi, int &pj, const CigarExt &ce) {
+	for (int i = 0; i < ce.op.size(); i++) {
+		if (ce.op[i] == 'I') {
+			pj += ce.num[i];
+		} else if (ce.op[i] == 'D') {
+			pi += ce.num[i];
+		} else {
+			pi += ce.num[i];
+			pj += ce.num[i];
+		}
+	}
+}
+
 struct GapAndUnit {
 	bool si_gap;
 	string seq_t, seq_q;
@@ -1164,8 +1216,8 @@ struct GapAndUnit {
 };
 
 void fill_SI_gap(const ZigOptions &opt,
-	int t_len, const char *t_seq, vector<Dp2Profile> &pro_t,
-	int q_len, const char *q_seq, vector<Dp2Profile> &pro_q)
+	int len_t, const char *seq_t, vector<Dp2Profile> &pro_t,
+	int len_q, const char *seq_q, vector<Dp2Profile> &pro_q)
 {
 	vector<Dp2Profile> aln_t, aln_q, del_t, del_q;
 	for (const Dp2Profile &p: pro_t) {
@@ -1182,8 +1234,8 @@ void fill_SI_gap(const ZigOptions &opt,
 	vector<GapAndUnit> tasks;
 	int jt = 0, jq = 0;
 	for (int i = 0; i <= aln_t.size(); i++) {
-		int gap_t_beg = i == 0 ?0 :aln_t[i-1].end, gap_t_end = i == aln_q.size() ?t_len :aln_t[i].beg;
-		int gap_q_beg = i == 0 ?0 :aln_q[i-1].end, gap_q_end = i == aln_q.size() ?q_len :aln_q[i].beg;
+		int gap_t_beg = i == 0 ?0 :aln_t[i-1].end, gap_t_end = i == aln_q.size() ?len_t :aln_t[i].beg;
+		int gap_q_beg = i == 0 ?0 :aln_q[i-1].end, gap_q_end = i == aln_q.size() ?len_q :aln_q[i].beg;
 
 		// Deleted units within the gap
 		GapAndUnit gap(true);
@@ -1191,7 +1243,7 @@ void fill_SI_gap(const ZigOptions &opt,
 		for (; jt < del_t.size(); jt++) {
 			int b = del_t[jt].beg, e = del_t[jt].end;
 			if (b >= gap_t_beg and e <= gap_t_end) {
-				for (int j = last_pos; j < b; j++) gap.seq_t.push_back(t_seq[j]);
+				for (int j = last_pos; j < b; j++) gap.seq_t.push_back(seq_t[j]);
 				gap.seq_t.push_back(UNIT_SI_CHAR);
 				Dp2Profile x = del_t[jt];
 				gap.del_t.push_back(x);
@@ -1201,14 +1253,14 @@ void fill_SI_gap(const ZigOptions &opt,
 			}
 		}
 		for (int j = last_pos; j < gap_t_end; j++) {
-			gap.seq_t.push_back(t_seq[j]);
+			gap.seq_t.push_back(seq_t[j]);
 		}
 
 		last_pos = gap_q_beg;
 		for (; jq < del_q.size(); jq++) {
 			int b = del_q[jq].beg, e = del_q[jq].end;
 			if (b >= gap_q_beg and e <= gap_q_end) {
-				for (int j = last_pos; j < b; j++) gap.seq_q.push_back(q_seq[j]);
+				for (int j = last_pos; j < b; j++) gap.seq_q.push_back(seq_q[j]);
 				gap.seq_q.push_back(UNIT_SI_CHAR);
 				Dp2Profile x = del_q[jq];
 				gap.del_q.push_back(x);
@@ -1218,7 +1270,7 @@ void fill_SI_gap(const ZigOptions &opt,
 			}
 		}
 		for (int j = last_pos; j < gap_q_end; j++) {
-			gap.seq_q.push_back(q_seq[j]);
+			gap.seq_q.push_back(seq_q[j]);
 		}
 		if (not gap.seq_t.empty() or not gap.seq_q.empty()) {
 			tasks.push_back(gap);
@@ -1231,28 +1283,120 @@ void fill_SI_gap(const ZigOptions &opt,
 			tasks.push_back(unit);
 		}
 	}
+	assert(jt == del_t.size() and jq == del_q.size());
 
 	const int MAX_BW = 20000;
-	AlnSta si_sum, dsi_sum;
+	#pragma omp parallel for
 	for (GapAndUnit &g: tasks) {
+		int n, m;
+		const char *t, *q;
 		if (g.si_gap) {
-			AlnSta as = global_cigar(opt.si, g.seq_t.length(), g.seq_t.data(), g.seq_q.length(), g.seq_q.data(), MAX_BW);
-			g.ext_t = as.ext_a;
-			g.ext_q = as.ext_b;
-			si_sum += as;
+			n = g.seq_t.length();
+			m = g.seq_q.length();
+			t = g.seq_t.data();
+			q = g.seq_q.data();
 		} else {
-			const char *t = t_seq + g.aln_t.beg, *q = q_seq + g.aln_q.beg;
-			int n = g.aln_t.end - g.aln_t.beg, m = g.aln_q.end - g.aln_q.beg;
-			AlnSta as = global_cigar(opt.si, n, t, m, q, MAX_BW);
-			g.ext_t = as.ext_a;
-			g.ext_q = as.ext_b;
-			dsi_sum += as;
+			n = g.aln_t.end - g.aln_t.beg;
+			m = g.aln_q.end - g.aln_q.beg;
+			t = seq_t + g.aln_t.beg;
+			q = seq_q + g.aln_q.beg;
+		}
+		AlnSta as = global_cigar(opt.si, n, t, m, q, MAX_BW);
+		g.ext_t = as.ext_a;
+		g.ext_q = as.ext_b;
+	}
+
+	int pi = 0, pj = 0;
+	vector<CigarExt> ret;
+	for (const GapAndUnit &g: tasks) {
+		if (g.si_gap) {
+			// Insert deleted repeats back
+			int last_pos = 0;
+			jt = jq = 0;
+			for (int i = 0; i < g.ext_t.length(); i++) {
+				if (g.ext_t[i] == UNIT_SI_CHAR or g.ext_q[i] == UNIT_SI_CHAR) {
+					if (i > last_pos) {
+						CigarExt ce = parse_aligned_seq(i - last_pos,
+							g.ext_t.data() + last_pos, g.ext_q.data() + last_pos, opt.cigar_neq);
+						ce.pid = -1;
+						ret.push_back(ce);
+						move_pointer(pi, pj, ce);
+					}
+					last_pos = i + 1;
+				}
+
+				if (g.ext_t[i] == UNIT_SI_CHAR) {
+					const Dp2Profile &pt = g.del_t[jt++];
+					CigarExt ce;
+					ce.pid = pt.pid;
+					ce.op.push_back('D');
+					ce.num.push_back(pt.end - pt.beg);
+					ret.push_back(ce);
+					assert(pi == pt.beg);
+					move_pointer(pi, pj, ce);
+					assert(pi == pt.end);
+				} else if (g.ext_q[i] == UNIT_SI_CHAR) {
+					const Dp2Profile &pq = g.del_q[jq++];
+					CigarExt ce;
+					ce.pid = pq.pid;
+					ce.op.push_back('I');
+					ce.num.push_back(pq.end - pq.beg);
+					ret.push_back(ce);
+					assert(pj == pq.beg);
+					move_pointer(pi, pj, ce);
+					assert(pj == pq.end);
+				}
+			}
+			assert(jt == g.del_t.size() and jq == g.del_q.size());
+			if (g.ext_t.length() > last_pos) {
+				CigarExt ce = parse_aligned_seq(g.ext_t.length() - last_pos,
+					g.ext_t.data() + last_pos, g.ext_q.data() + last_pos, opt.cigar_neq);
+				ce.pid = -1;
+				ret.push_back(ce);
+				move_pointer(pi, pj, ce);
+			}
+		} else {
+			CigarExt ce = parse_aligned_seq(g.ext_t.length(), g.ext_t.data(), g.ext_q.data(), opt.cigar_neq);
+			ce.pid = g.aln_t.pid;
+			ret.push_back(ce);
+			assert(pi == g.aln_t.beg and pj == g.aln_q.beg);
+			move_pointer(pi, pj, ce);
+			assert(pi == g.aln_t.end and pj == g.aln_q.end);
 		}
 	}
-	fprintf(stderr, "Final alignment:\n");
-	fprintf(stderr, "DSI: %d mat, %d mis, %d ins and %d del\n",
-		dsi_sum.mat, dsi_sum.mis, dsi_sum.ins, dsi_sum.del);
+	assert(pi == len_t and pj == len_q);
 
+	// Sanity check
+	{
+		string t, q;
+		pi = pj = 0;
+		int del = 0, ins = 0, mat = 0, mis =0 ;
+		for (const CigarExt &ce: ret) {
+			for (int i = 0; i < ce.op.size(); i++) {
+				if (ce.op[i] == 'I') {
+					for (int j = 0; j < ce.num[i]; j++) {
+						q += seq_q[pj++];
+					}
+					ins += ce.num[i];
+				} else if (ce.op[i] == 'D') {
+					for (int j = 0; j < ce.num[i]; j++) {
+						t += seq_t[pi++];
+					}
+					del += ce.num[i];
+				} else {
+					for (int j = 0; j < ce.num[i]; j++) {
+						mis += seq_t[pi] != seq_q[pj];
+						mat += seq_t[pi] == seq_q[pj];
+						t += seq_t[pi++];
+						q += seq_q[pj++];
+					}
+				}
+			}
+		}
+		assert(pi == len_t and pj == len_q);
+		assert(string(seq_t) == t and string(seq_q) == q);
+		cerr << del << "\t" << ins << "\t" << mat << "\t" << mis << endl;
+	}
 }
 
 void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
