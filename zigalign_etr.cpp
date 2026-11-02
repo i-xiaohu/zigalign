@@ -1356,6 +1356,65 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 		assert(pi == len_t and pj == len_q);
 		assert(string(seq_t) == t and string(seq_q) == q);
 	}
+
+	int si_mat = 0, si_mis = 0, si_ins = 0, si_del = 0;
+	int u_aln = 0, u_ins = 0, u_del = 0;
+	int b_mat = 0, b_mis = 0, b_ins = 0, b_del = 0;
+	pi = pj = 0;
+	for (const CigarExt &ce: ret) {
+		if (ce.pid == -1) { // SI
+			for (int i = 0; i < ce.op.size(); i++) {
+				if (ce.op[i] == 'I') {
+					si_ins += ce.num[i];
+					pj += ce.num[i];
+				} else if (ce.op[i] == 'D') {
+					si_del += ce.num[i];
+					pi += ce.num[i];
+				} else {
+					for (int j = 0; j < ce.num[i]; j++) {
+						si_mat += seq_t[pi] == seq_q[pj];
+						si_mis += seq_t[pi] != seq_q[pj];
+						pi++;
+						pj++;
+					}
+				}
+			}
+		} else { // DSI
+			if (ce.op.size() == 1 and ce.op[0] == 'I') {
+				u_ins++;
+				b_ins += ce.num[0];
+				pj += ce.num[0];
+			} else if (ce.op.size() == 1 and ce.op[0] == 'D') {
+				u_del++;
+				b_del += ce.num[0];
+				pi += ce.num[0];
+			} else {
+				u_aln++;
+				for (int i = 0; i < ce.op.size(); i++) {
+					if (ce.op[i] == 'I') {
+						b_ins += ce.num[i];
+						pj += ce.num[i];
+					} else if (ce.op[i] == 'D') {
+						b_del += ce.num[i];
+						pi += ce.num[i];
+					} else {
+						for (int j = 0; j < ce.num[i]; j++) {
+							b_mat += seq_t[pi] == seq_q[pj];
+							b_mis += seq_t[pi] != seq_q[pj];
+							pi++;
+							pj++;
+						}
+					}
+				}
+			}
+		}
+	}
+	assert(pi == len_t and pj == len_q);
+	fprintf(stderr, "Final alignment:\n");
+	fprintf(stderr, "  SI: %d mat, %d mis, %d ins, %d del\n", si_mat, si_mis, si_ins, si_del);
+	fprintf(stderr, "  DSI(base): %d mat, %d mis, %d ins, %d del\n", b_mat, b_mis, b_ins, b_del);
+	fprintf(stderr, "  DSI(unit): %d aln, %d ins, %d del\n", u_aln, u_ins, u_del);
+	fprintf(stderr, "\n");
 	return ret;
 }
 
@@ -1439,8 +1498,10 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	ScoreMatrix matrix;
 	if (opt.dev_label[1] == '1') {
 		matrix = build_score_matrix(opt, n_class, lr_t, len_t, seq_t, lr_q, len_q, seq_q);
-		string matrix_fn = string(opt.log_prefix) + "_matrix.bin";
-		output_matrix(matrix_fn, matrix);
+		if (opt.log_prefix) {
+			string matrix_fn = string(opt.log_prefix) + "_matrix.bin";
+			output_matrix(matrix_fn, matrix);
+		}
 	} else if (opt.dev_label[1] == '0') {
 		string matrix_fn = string(opt.log_prefix) + "_matrix.bin";
 		matrix = input_matrix(matrix_fn);
@@ -1451,8 +1512,10 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 		profile_t = construct_profile(opt, n_class, lr_t);
 		profile_q = construct_profile(opt, n_class, lr_q);
 		alignment_backbone(opt, matrix, profile_t, profile_q);
-		string profile_fn = string(opt.log_prefix) + "_profile.bin";
-		output_profile(profile_fn, profile_t, profile_q);
+		if (opt.log_prefix) {
+			string profile_fn = string(opt.log_prefix) + "_profile.bin";
+			output_profile(profile_fn, profile_t, profile_q);
+		}
 	} else {
 		string profile_fn = string(opt.log_prefix) + "_profile.bin";
 		input_profile(profile_fn, profile_t, profile_q);
