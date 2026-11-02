@@ -2,7 +2,7 @@
 #include "zigalign.h"
 #include "input_fasta.h"
 
-const string VERSION = "v0.2-023";
+const string VERSION = "v0.3";
 
 static int str2int(const char* s) {
     return (int)strtol(s, nullptr, 10);
@@ -11,83 +11,92 @@ static int str2int(const char* s) {
 int usage(const ZigOptions &o) {
     fprintf(stderr, "Usage: zigalign [options] seq1.fa seq2.fa > aln.paf\n");
     fprintf(stderr, "Version: %s\n", VERSION.data());
-    fprintf(stderr, "  Common options:\n");
-    fprintf(stderr, "    -t [INT]  number of threads\n");
-    fprintf(stderr, "    -v [STR]  intermediate results prefix\n");
-    fprintf(stderr, "  Scoring parameters for pairwise alignment:\n");
-    fprintf(stderr, "    -A [INT]  match score [%d]\n", o.mat_score);
-    fprintf(stderr, "    -B [INT]  mismatch penalty [%d]\n", o.mis_pen);
-    fprintf(stderr, "    -O [INT]  open gap(indel) penalty [%d]\n", o.gap_o);
-    fprintf(stderr, "    -E [INT]  extend gap penalty [%d]\n", o.gap_e);
-    fprintf(stderr, "    -D [INT]  repeat unit deletion penalty [%d]\n", o.del_unit_pen);
-    fprintf(stderr, "  Scoring options for self-alignment:\n");
-    fprintf(stderr, "    -u [INT]  minimum repeat unit size [%d]\n", o.min_unit_size);
-    fprintf(stderr, "    -d [INT]  open tandem repeat penalty [%d]\n", o.open_tr_pen);
-    fprintf(stderr, "    -p [INT]  close tandem repeat penalty [%d]\n", o.close_tr_pen);
-    fprintf(stderr, "    -a [INT]  match score [%d]\n", o.sa_mat_score);
-    fprintf(stderr, "    -b [INT]  mismatch penalty [%d]\n", o.sa_mis_pen);
-    fprintf(stderr, "    -o [INT]  open gap(indel) penalty [%d]\n", o.sa_gap_o);
-    fprintf(stderr, "    -e [INT]  extend gap penalty [%d]\n", o.sa_gap_e);
-    fprintf(stderr, "Note: self-alignment scoring matrix must reward more and/or \n"
-                    "  penalize less than regular matrix to discover tandem repeats.\n"
-                    "  Pairwise scoring matrix must penalize discrepancies harder as DSI models do.\n");
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "    -t  number of threads, default=%d\n", o.n_threads);
+    fprintf(stderr, "    -o  output alignment in PAF format, default=stdout\n");
+    fprintf(stderr, "    -c  replace M with =X in CIGAR, default=false\n");
+    fprintf(stderr, "    -y  output detailed alignment in TSV format, recommended to set\n");
+    fprintf(stderr, "    -S  [mat,mis,gap_o,gap_e] score matrix of SI model, default={%d,%d,%d,%d}\n",
+        o.si.mat, o.si.mis, o.si.gap_o, o.si.gap_e);
+    fprintf(stderr, "    -D  penalty of D transfer, default=%d\n", o.open_tr_pen);
+    fprintf(stderr, "    -m  minimum repeat unit size, default=%d\n", o.min_unit_size);
+    fprintf(stderr, "    -F  [mat,mis,gap_o,gap_e] score matrix of self-alignment, default={%d,%d,%d,%d}\n",
+        o.self_aln.mat, o.self_aln.mis, o.self_aln.gap_o, o.self_aln.gap_e);
+    fprintf(stderr, "    -U  [mat,mis,gap_o,gap_e] score matrix of pair-alignment for repeat units, default={%d,%d,%d,%d}\n",
+        o.unit_aln.mat, o.unit_aln.mis, o.unit_aln.gap_o, o.unit_aln.gap_e);
+    fprintf(stderr, "    -z  maximum deleted repeat units, default=%d\n", o.max_units_del);
+    fprintf(stderr, "    -B  penalty of B transfer, default=%d\n", o.close_tr_pen);
+    fprintf(stderr, "    -k  minimum repeat count; filtered if fewer, default=%d\n", o.min_reps_cnt);
+    fprintf(stderr, "\n");
     return 1;
 }
 
+ScoreParameters parse_scores(const char *s)
+{
+    assert(s[0] == '[');
+    string x;
+    vector<int> nums;
+    for (int i = 1; s[i] != ']'; i++) {
+        if (s[i] == ',') {
+            nums.push_back(str2int(x.data()));
+            x = "";
+        } else {
+            x += s[i];
+        }
+    }
+    nums.push_back(str2int(x.data()));
+    assert(nums.size() == 4);
+    ScoreParameters ret(nums[0], nums[1], nums[2], nums[3]);
+    return ret;
+}
 
 int main(int argc, char *argv[]) {
     double ctime = cputime(), rtime = realtime();
     ZigOptions opt;
     if (argc == 1) return usage(opt);
     int c;
-    while ((c = getopt(argc, argv, "A:B:O:E:D:u:d:p:a:b:o:e:k:v:t:@:")) >= 0) {
+    while ((c = getopt(argc, argv, "t:o:cy:S:D:m:F:U:z:B:k:l:d:")) >= 0) {
         switch (c) {
-        case 'A':
-            opt.mat_score = abs(str2int(optarg));
-            break;
-        case 'B':
-            opt.mis_pen = -abs(str2int(optarg));
-            break;
-        case 'O':
-            opt.gap_o = -abs(str2int(optarg));
-            break;
-        case 'E':
-            opt.gap_e = -abs(str2int(optarg));
-            break;
-        case 'D':
-            opt.del_unit_pen = -abs(str2int(optarg));
-            break;
-        case 'u':
-            opt.min_unit_size = abs(str2int(optarg));
-            break;
-        case 'd':
-            opt.open_tr_pen = -abs(str2int(optarg));
-            break;
-        case 'p':
-            opt.close_tr_pen = -abs(str2int(optarg));
-            break;
-        case 'a':
-            opt.sa_mat_score = abs(str2int(optarg));
-            break;
-        case 'b':
-            opt.sa_mis_pen = -abs(str2int(optarg));
-            break;
-        case 'o':
-            opt.sa_gap_o = -abs(str2int(optarg));
-            break;
-        case 'e':
-            opt.sa_gap_e = -abs(str2int(optarg));
-            break;
-        case 'k':
-            opt.band_width = abs(str2int(optarg));
-            break;
-        case 'v':
-            opt.log_prefix = optarg;
-            break;
         case 't':
             opt.n_threads = abs(str2int(optarg));
             break;
-        case '@':
+        case 'o':
+            opt.paf_fn = optarg;
+            break;
+        case 'c':
+            opt.cigar_neq = true;
+            break;
+        case 'y':
+            opt.dsi_fn = optarg;
+            break;
+        case 'S':
+            opt.si = parse_scores(optarg);
+            break;
+        case 'D':
+            opt.open_tr_pen = str2int(optarg);
+            break;
+        case 'm':
+            opt.min_unit_size = str2int(optarg);
+            break;
+        case 'F':
+            opt.self_aln = parse_scores(optarg);
+            break;
+        case 'U':
+            opt.unit_aln = parse_scores(optarg);
+            break;
+        case 'z':
+            opt.max_units_del = str2int(optarg);
+            break;
+        case 'B':
+            opt.close_tr_pen = str2int(optarg);
+            break;
+        case 'k':
+            opt.min_reps_cnt = str2int(optarg);
+            break;
+        case 'l':
+            opt.log_prefix = optarg;
+            break;
+        case 'd':
             opt.dev_label = optarg;
             break;
         default:

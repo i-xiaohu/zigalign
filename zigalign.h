@@ -30,21 +30,20 @@ struct ZigOptions {
     // SI model
     ScoreParameters si{1, -4, -6, -1};
     // DSI model
-    int min_unit_size = 50;
-    int open_tr_pen = -12;
-    int close_tr_pen = -36;
+    int open_tr_pen = -12; // D transfer
+    int min_unit_size = 100;
     ScoreParameters self_aln{1, -1, -4, -1};
     ScoreParameters unit_aln{1, -120, -180, -30};
-    int del_unit_pen = -20;
-    int min_reps_cnt = 20;
     int max_units_del = 40000;
+    int close_tr_pen = -36; // B transfer
+    int min_reps_cnt = 20;
 
     int n_threads = 8;
     char cigar_neq = false; // True if cigar includes =X instead of M
     const char *log_prefix = nullptr; // Intermediate results
     const char *paf_fn = nullptr;
     const char *dsi_fn = nullptr;
-    string dev_label = "0000"; // Run a stage or input from local files
+    string dev_label = "1111"; // Run a stage or input from local files
 
     // ----------------------------------------- //
     // Scoring parameters for repeats in pairwise alignment
@@ -68,19 +67,13 @@ struct ZigOptions {
         mis_pen = -120; // Increased penalty for small variants, i.e., duplication indels are preferred.
         gap_o = -180;
         gap_e = -30;
-        min_unit_size = 100;
         sa_mat_score = 2;
         sa_mis_pen = -3;
         sa_gap_o = -3;
         sa_gap_e = -1;
-        open_tr_pen = -2;
-        close_tr_pen = -6;
-        del_unit_pen = -20;
         del_dup_o = -6;
         del_dup_e = -2;
         band_width = 50;
-        n_threads = 8;
-        log_prefix = nullptr;
     }
 };
 
