@@ -495,78 +495,6 @@ vector<TandemRepeats> collect_long_repeats(const ZigOptions &opt, int n, const c
 	return ret;
 }
 
-void extended_paf_format(const string &t_name, int t_len, const string &ext_t,
-	const string &q_name, int q_len, const string ext_q, const vector<int> &rid_map)
-{
-	assert(ext_t.length() == ext_q.length());
-	char strand = '+';
-	int matches_n = 0, mismatches_n = 0, len = ext_t.length();
-	int mapq = 60;
-
-	string cigar;
-	char op_type = '@';
-	int op_cnt = 0;
-	int t_pointer = 0;
-	for (int i = 0; i < len; i++) {
-		if (ext_t[i] == 'A' or ext_t[i] == 'C' or ext_t[i] == 'G' or ext_t[i] == 'T') {
-			t_pointer++;
-		}
-		if (ext_t[i] == '[' or ext_t[i] == ']') {
-			if (op_type != '@') {
-				cigar += to_string(op_cnt);
-				cigar += op_type;
-			}
-			if (ext_t[i] == '[') {
-				int id = -1;
-				for (int j = 0; j < 20; j++) {
-					if (t_pointer - j >= 0 and rid_map[t_pointer - j] != -1) {
-						id = rid_map[t_pointer - j];
-						break;
-					}
-					if (t_pointer + j < t_len and rid_map[t_pointer + j] != -1) {
-						id = rid_map[t_pointer + j];
-						break;
-					}
-				}
-				if (id != -1) cigar += '(' + to_string(id) + ')';
-			}
-			cigar += ext_t[i];
-			op_type = '@';
-			op_cnt = 0;
-		} else {
-			int curr_ot;
-			if (ext_t[i] == '-') {
-				curr_ot = 'I';
-			} else if (ext_q[i] == '-') {
-				curr_ot = 'D';
-			} else {
-				curr_ot = 'M'; // Match and mismatches
-				if (ext_t[i] == ext_q[i]) matches_n++;
-				else mismatches_n++;
-			}
-
-			if (curr_ot == op_type) op_cnt++;
-			else {
-				if (op_type != '@') {
-					cigar += to_string(op_cnt);
-					cigar += op_type;
-				}
-				op_type = curr_ot;
-				op_cnt = 1;
-			}
-		}
-	}
-	if (op_type != '@' and op_cnt > 0) {
-		cigar += to_string(op_cnt);
-		cigar += op_type;
-	}
-
-	fprintf(stdout, "%s\t%d\t%d\t%d\t%c\t", q_name.c_str(), q_len, 0, q_len, strand);
-	fprintf(stdout, "%s\t%d\t%d\t%d\t", t_name.c_str(), t_len, 0, t_len);
-	fprintf(stdout, "%d\t%d\t%d\t", matches_n + mismatches_n, len, mapq);
-	fprintf(stdout, "cg:Z:%s\n", cigar.c_str());
-}
-
 void print_tr_by_class(int n, const vector<TandemRepeats> &lr_t, const vector<TandemRepeats> &lr_q)
 {
 	vector<pair<bool, int>> group[n];
@@ -1159,6 +1087,7 @@ struct CigarExt
 	int pid; // -1 for SI region
 	vector<char> op;
 	vector<int> num;
+	CigarExt(): pid(-1) {}
 };
 
 CigarExt parse_aligned_seq(int n, const char *a, const char *b, bool neq)
@@ -1188,8 +1117,10 @@ CigarExt parse_aligned_seq(int n, const char *a, const char *b, bool neq)
 		cnt++;
 		prev_op = curr_op;
 	}
-	ret.op.push_back(prev_op);
-	ret.num.push_back(cnt);
+	if (prev_op != '@') {
+		ret.op.push_back(prev_op);
+		ret.num.push_back(cnt);
+	}
 	return ret;
 }
 
@@ -1206,6 +1137,40 @@ void move_pointer(int &pi, int &pj, const CigarExt &ce) {
 	}
 }
 
+// Merge SI and DSI cigar for compatibility with PAF format
+CigarExt combine_cigar(const vector<CigarExt> &a)
+{
+	CigarExt ret;
+	char prev_op = '@';
+	int cnt = 0;
+	for (const CigarExt &ce: a) {
+		for (int i = 0; i < ce.op.size(); i++) {
+			char curr_op = ce.op[i];
+			if (prev_op != '@' and curr_op != prev_op) {
+				ret.op.push_back(prev_op);
+				ret.num.push_back(cnt);
+				cnt = 0;
+			}
+			cnt += ce.num[i];
+			prev_op = curr_op;
+		}
+	}
+	if (prev_op != '@') {
+		ret.op.push_back(prev_op);
+		ret.num.push_back(cnt);
+	}
+	return ret;
+}
+
+string cigar_to_str(const CigarExt &ce) {
+	string ret;
+	for (int i = 0; i < ce.op.size(); i++) {
+		ret += to_string(ce.num[i]);
+		ret += ce.op[i];
+	}
+	return ret;
+}
+
 struct GapAndUnit {
 	bool si_gap;
 	string seq_t, seq_q;
@@ -1215,7 +1180,7 @@ struct GapAndUnit {
 	GapAndUnit(bool gap): si_gap(gap), aln_t(), aln_q() {}
 };
 
-void fill_SI_gap(const ZigOptions &opt,
+vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 	int len_t, const char *seq_t, vector<Dp2Profile> &pro_t,
 	int len_q, const char *seq_q, vector<Dp2Profile> &pro_q)
 {
@@ -1370,23 +1335,18 @@ void fill_SI_gap(const ZigOptions &opt,
 	{
 		string t, q;
 		pi = pj = 0;
-		int del = 0, ins = 0, mat = 0, mis =0 ;
 		for (const CigarExt &ce: ret) {
 			for (int i = 0; i < ce.op.size(); i++) {
 				if (ce.op[i] == 'I') {
 					for (int j = 0; j < ce.num[i]; j++) {
 						q += seq_q[pj++];
 					}
-					ins += ce.num[i];
 				} else if (ce.op[i] == 'D') {
 					for (int j = 0; j < ce.num[i]; j++) {
 						t += seq_t[pi++];
 					}
-					del += ce.num[i];
 				} else {
 					for (int j = 0; j < ce.num[i]; j++) {
-						mis += seq_t[pi] != seq_q[pj];
-						mat += seq_t[pi] == seq_q[pj];
 						t += seq_t[pi++];
 						q += seq_q[pj++];
 					}
@@ -1395,8 +1355,51 @@ void fill_SI_gap(const ZigOptions &opt,
 		}
 		assert(pi == len_t and pj == len_q);
 		assert(string(seq_t) == t and string(seq_q) == q);
-		cerr << del << "\t" << ins << "\t" << mat << "\t" << mis << endl;
 	}
+	return ret;
+}
+
+void print_paf_result(const char *fn, const string &t_name, int t_len, const string &q_name, int q_len, const vector<CigarExt> &cigar_ext)
+{
+	FILE *fo = stdout;
+	if (fn) {
+		fo = fopen(fn, "w");
+		assert(fo != nullptr);
+	}
+	char strand = '+';
+	int len_no_gap = 0, len_with_gap = 0;
+	int mapq = 60;
+	for (const CigarExt &ce: cigar_ext) {
+		for (int i = 0; i < ce.op.size(); i++) {
+			len_with_gap += ce.num[i];
+			if (ce.op[i] != 'I' and ce.op[i] != 'D') {
+				len_no_gap += ce.num[i];
+			}
+		}
+	}
+	CigarExt ce = combine_cigar(cigar_ext);
+	string cigar = cigar_to_str(ce);
+
+	fprintf(fo, "%s\t%d\t%d\t%d\t%c\t", q_name.c_str(), q_len, 0, q_len, strand);
+	fprintf(fo, "%s\t%d\t%d\t%d\t", t_name.c_str(), t_len, 0, t_len);
+	fprintf(fo, "%d\t%d\t%d\t", len_no_gap, len_with_gap, mapq);
+	fprintf(fo, "cg:Z:%s\n", cigar.c_str());
+	if (fn and fo) fclose(fo);
+}
+
+void print_dsi_result(const char *fn, const vector<CigarExt> &cigar_ext) {
+	if (not fn) return;
+	FILE *fo = fopen(fn, "w");
+	assert(fo != nullptr);
+	fprintf(fo, "%s\t%s\t%s\t%s\t%s\t%s\n", "rep_id", "t_beg", "t_end", "q_beg", "q_end", "cigar");
+	int pos_t = 0, pos_q = 0;
+	for (const CigarExt &ce: cigar_ext) {
+		int start_t = pos_t, start_q = pos_q;
+		move_pointer(pos_t, pos_q, ce);
+		string cigar = cigar_to_str(ce);
+		fprintf(fo, "%d\t%d\t%d\t%d\t%d\t%s\n", ce.pid, start_t, pos_t, start_q, pos_q, cigar.c_str());
+	}
+	fclose(fo);
 }
 
 void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
@@ -1455,5 +1458,7 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 		input_profile(profile_fn, profile_t, profile_q);
 	}
 
-	fill_SI_gap(opt, len_t, seq_t, profile_t, len_q, seq_q, profile_q);
+	vector<CigarExt> cigar_ext = fill_SI_gap(opt, len_t, seq_t, profile_t, len_q, seq_q, profile_q);
+	print_paf_result(opt.paf_fn, name_t, len_t, name_q, len_q, cigar_ext);
+	print_dsi_result(opt.dsi_fn, cigar_ext);
 }
