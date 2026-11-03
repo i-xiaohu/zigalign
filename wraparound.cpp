@@ -54,6 +54,7 @@ AlnSta global_cigar(const ScoreParameters &sp, int n, const char *a, int m, cons
 	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
 	prev_H[0] = 0;
 	for (int i = 1; i <= m; i++) prev_H[i] = prev_E[i] = GAP_O + i * GAP_E;
+	// TODO: reduce memory cost or use KSW
 	vector<vector<uint8_t>> bt(n + 1);
 	for (int i = 0; i <= n; i++) bt[i].resize(m + 1, 0);
 	for (int j = 1; j <= m; j++) bt[0][j] = BT_HORIZONTAL;

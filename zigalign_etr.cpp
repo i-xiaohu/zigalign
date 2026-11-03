@@ -825,7 +825,6 @@ ScoreMatrix build_score_matrix(const ZigOptions &opt, int n_class,
 	vector<vector<RepInterval>> reps_t(n_class);
 	vector<vector<RepInterval>> reps_q(n_class);
 	for (TandemRepeats &lr: lr_t) {
-		lr.base_idx = n;
 		n += lr.repeats.size();
 		for (const RepInterval &r: lr.repeats) {
 			reps_t[lr.pid].push_back(r);
@@ -833,7 +832,6 @@ ScoreMatrix build_score_matrix(const ZigOptions &opt, int n_class,
 		}
 	}
 	for (TandemRepeats &lr: lr_q) {
-		lr.base_idx = m;
 		m += lr.repeats.size();
 		for (const RepInterval &r: lr.repeats) {
 			reps_q[lr.pid].push_back(r);
@@ -930,7 +928,7 @@ vector<Dp2Profile> construct_profile(const ZigOptions &opt, int n_class, const v
 	vector<int> cnt(n_class, 0);
 	for (const TandemRepeats &tr: lr) {
 		for (const RepInterval &r: tr.repeats) {
-			// Synchronize with score matrix
+			// Synchronize with the score matrix
 			Dp2Profile p(tr.pid, cnt[tr.pid]++, r.beg, r.end);
 			// Deletion penalty = SI_gap_o + sqrt(unit_len) * SI_gap_e
 			p.del_pen = opt.si.gap_o + opt.si.gap_e * round(sqrt(r.end - r.beg));
@@ -958,12 +956,17 @@ void alignment_backbone(const ZigOptions &opt, const ScoreMatrix &matrix, vector
 		bt[0][j] = BT_HORIZONTAL;
 	}
 	const int MAX_UNITS_DEL = opt.max_units_del;
+	int beg = 1, end = m;
 	for (int i = 1; i <= n; i++) {
 		const Dp2Profile &t = pro_t[i-1];
 		curr_dp[0] = prev_dp[0] + t.del_pen; // The first column
 		bt[i][0] = BT_VERTICAL;
-		int beg = max(i - MAX_UNITS_DEL, 1);
-		int end = min(i + MAX_UNITS_DEL, m);
+		beg = max(i - MAX_UNITS_DEL, 1);
+		end = min(i + MAX_UNITS_DEL, m);
+		if (beg > end) {
+			for (int k = i; k <= n; k++) bt[k][m] = BT_VERTICAL;
+			break;
+		}
 		if (beg > 1) curr_dp[beg-1] = -INF; // Boundary of the band
 		for (int j = beg; j <= end; j++) {
 			const Dp2Profile &q = pro_q[j-1];
@@ -974,7 +977,7 @@ void alignment_backbone(const ZigOptions &opt, const ScoreMatrix &matrix, vector
 				assert(t.pid < matrix.size());
 				assert(t.idx < matrix[t.pid].size());
 				assert(q.idx < matrix[t.pid][t.idx].size());
-				d = matrix[t.pid][t.idx][q.idx];
+				d = prev_dp[j-1] + matrix[t.pid][t.idx][q.idx];
 			}
 
 			curr_dp[j] = -INF; // Initialization
@@ -994,6 +997,7 @@ void alignment_backbone(const ZigOptions &opt, const ScoreMatrix &matrix, vector
 		if (end < m) curr_dp[end+1] = -INF; // Used by the next row
 		swap(curr_dp, prev_dp);
 	}
+	if (end < m) for (int j = end+1; j <= m; j++) bt[n][j] = BT_HORIZONTAL;
 	fprintf(stderr, "Construct alignment backbone in %.2f real time, %.2f CPU time\n", realtime() - t_real, cputime() - t_cpu);
 	fprintf(stderr, "  Score matrix size is (%d X %d)\n", n, m);
 
@@ -1018,6 +1022,7 @@ void alignment_backbone(const ZigOptions &opt, const ScoreMatrix &matrix, vector
 			break;
 		}
 	}
+	assert(pi == 0 and pj == 0);
 
 	int mat_n = 0, mat_len = 0;
 	int del_n = 0, del_len = 0;
