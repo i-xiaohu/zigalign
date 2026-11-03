@@ -73,7 +73,6 @@ AlnSta global_cigar(const ScoreParameters &sp, int n, const char *a, int m, cons
 		if (beg == 1) curr_H[beg-1] = GAP_O + i * GAP_E;
 		else curr_H[beg-1] = -INF;
 		int F = -INF;
-		int max_score = -INF;
 		for (int j = beg; j <= end; j++) {
 			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
 			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
@@ -91,11 +90,8 @@ AlnSta global_cigar(const ScoreParameters &sp, int n, const char *a, int m, cons
 					bt[i][j] = BT_DIAGONAL;
 				}
 			}
-			max_score = max(max_score, curr_H[j]);
 		}
 		if (end < m) curr_H[end+1] = curr_E[end+1] = -INF;
-		assert(max_score > -INF);
-		if (max_score == -INF) break;
 
 		swap(prev_H, curr_H);
 		swap(prev_E, curr_E);
@@ -161,86 +157,6 @@ AlnSta global_cigar(const ScoreParameters &sp, int n, const char *a, int m, cons
 			if (ret.ext_b[i] == UNIT_SI_CHAR) assert(ret.ext_a[i] == '-');
 		}
 	}
-	return ret;
-}
-
-GlobalResult global_cigar2(const ScoreParameters &sp, int bw, int n, const char *a, int m, const char *b)
-{
-	const int MAT_S = sp.mat;
-	const int MIS_P = sp.mis;
-	const int GAP_O = sp.gap_o;
-	const int GAP_E = sp.gap_e;
-
-	vector<int> prev_H(m + 1, -INF), curr_H(m + 1, -INF);
-	vector<int> prev_E(m + 1, -INF), curr_E(m + 1, -INF);
-	prev_H[0] = 0;
-	for (int i = 1; i <= m; i++) {
-		prev_H[i] = prev_E[i] = GAP_O + i * GAP_E;
-	}
-	vector<vector<uint8_t>> bt(n + 1);
-	for (int i = 0; i <= n; i++) {
-		bt[i].resize(m + 1, 0);
-	}
-
-	for (int i = 1; i <= n; i++) {
-		int beg = max(1, i - bw);
-		int end = min(m, i + bw);
-		if (beg == 1) curr_H[beg-1] = GAP_O + i * GAP_E;
-		else curr_H[beg-1] = -INF;
-		int F = -INF;
-		int max_score = -INF;
-		for (int j = beg; j <= end; j++) {
-			F = max(F, curr_H[j-1] + GAP_O) + GAP_E;
-			curr_E[j] = max(prev_E[j], prev_H[j] + GAP_O) + GAP_E;
-			int M = prev_H[j-1] + (a[i-1] == b[j-1] ?MAT_S :MIS_P);
-			if (F > M) {
-				curr_H[j] = F;
-				bt[i][j] = BT_HORIZONTAL;
-			} else {
-				curr_H[j] = M;
-				bt[i][j] = BT_DIAGONAL;
-			}
-			if (curr_E[j] > curr_H[j]) {
-				curr_H[j] = curr_E[j];
-				bt[i][j] = BT_VERTICAL;
-			}
-			max_score = max(max_score, curr_H[j]);
-		}
-		if (end < m) curr_H[end+1] = curr_E[end+1] = -INF;
-		if (max_score == -INF) break;
-
-		swap(prev_H, curr_H);
-		swap(prev_E, curr_E);
-	}
-
-	GlobalResult ret;
-	ret.score = prev_H[m];
-	// Out of band
-	if (ret.score == -INF) return ret;
-
-	int pi = n, pj = m;
-	while (bt[pi][pj] != 0) {
-		switch (bt[pi][pj]) {
-		case BT_DIAGONAL:
-			pi--;
-			pj--;
-			if (a[pi] == b[pj]) ret.mat++;
-			else ret.mis++;
-			break;
-		case BT_VERTICAL:
-			pi--;
-			ret.gap++;
-			break;
-		case BT_HORIZONTAL:
-			pj--;
-			ret.gap++;
-			break;
-		default:
-			break;
-		}
-	}
-	ret.gap += pi;
-	ret.gap += pj;
 	return ret;
 }
 

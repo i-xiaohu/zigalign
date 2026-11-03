@@ -756,64 +756,6 @@ int normalize_repeats(const ZigOptions &opt, int n_class,
 	return n_class;
 }
 
-void collect_nested_repeats(const ZigOptions &opt, const TandemRepeats &tr, const char *seq)
-{
-	int n = tr.repeats.size();
-	vector<int> link_t(n, -1);
-	const int BACKWARD_CMP = 100;
-	const double MAX_DIV = 0.1;
-	#pragma omp parallel for
-	for (int i = 0; i < tr.repeats.size(); i++) {
-		const RepInterval &a = tr.repeats[i];
-		int len_a = a.end - a.beg;
-		int max_score = 0, max_id = -1;
-		for (int j = max(0, i-BACKWARD_CMP); j < i; j++) {
-			const RepInterval &b = tr.repeats[j];
-			int len_b = b.end - b.beg;
-			int bw = round(len_b * MAX_DIV);
-			GlobalResult gr = global_cigar2(opt.si, bw, len_a, seq + a.beg, len_b, seq + b.beg);
-			double div = 1.0 * (gr.mis + gr.gap) / min(len_a, len_b);
-			if (div < MAX_DIV and gr.score > max_score) {
-				max_score = gr.score;
-				max_id = j;
-			}
-		}
-		if (max_id != -1) {
-			link_t[i] = max_id;
-		}
-	}
-	vector<int> sid(n);
-	for (int i = 0; i < n; i++) sid[i] = i;
-	for (int i = 0; i < n; i++) {
-		if (link_t[i] != -1) {
-			us_union(sid, i, link_t[i]);
-		}
-	}
-	vector<int> cnt(n, 0);
-	for (int i = 0; i < n; i++) {
-		int x = us_find(sid, i);
-		cnt[x]++;
-	}
-	const int HIGH_FREQ = 100;
-	const double MIN_RATIO = 0.8;
-	int m = 0;
-	for (int i = 0; i < n; i++) {
-		int x = us_find(sid, i);
-		if (x > HIGH_FREQ) {
-			m++;
-		}
-	}
-	double ratio = 1.0 * m / n;
-	if (ratio > MIN_RATIO) {
-		fprintf(stderr, "Observe nested structure in TR size=%ld, range=[%d,%d)\n",
-			tr.repeats.size(), tr.repeats.front().beg, tr.repeats.back().end);
-		for (int i = 0; i < n; i++) {
-			fprintf(stderr, "%d -> %d\n", i, us_find(sid, i));
-		}
-		fprintf(stderr, "\n");
-	}
-}
-
 typedef vector<vector<vector<int>>> ScoreMatrix;
 
 ScoreMatrix build_score_matrix(const ZigOptions &opt, int n_class,

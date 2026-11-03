@@ -26,15 +26,6 @@ struct AlnSta {
 
 AlnSta global_cigar(const ScoreParameters &sp, int n, const char *a, int m, const char *b, int bw);
 
-struct GlobalResult {
-    int score, mat, mis, gap;
-    GlobalResult() {
-        score = mat = mis = gap = 0;
-    }
-};
-
-GlobalResult global_cigar2(const ScoreParameters &sp, int bw, int n, const char *a, int m, const char *b);
-
 vector<RepInterval> wraparound_dp(int pat_len, const char *pat_seq, int que_len, const char *que_seq);
 
 struct SgResult {
