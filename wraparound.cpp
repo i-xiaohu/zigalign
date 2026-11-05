@@ -1,4 +1,5 @@
 #include "wraparound.h"
+#include "ksw2.h"
 
 int global_alignment(const ScoreParameters &sp, int n, const char *a, int m, const char *b)
 {
@@ -45,6 +46,11 @@ int global_alignment(const ScoreParameters &sp, int n, const char *a, int m, con
 
 AlnSta global_cigar(const ScoreParameters &sp, int n, const char *a, int m, const char *b, int bw)
 {
+	if (1L * n * m / 1e9 > 64) {
+		fprintf(stderr, "[%s] Memery requirement > 64G !!!\n", __func__);
+		exit(1);
+	}
+
 	const int MAT_S = sp.mat;
 	const int MIS_P = sp.mis;
 	const int GAP_O = sp.gap_o;
@@ -160,6 +166,102 @@ AlnSta global_cigar(const ScoreParameters &sp, int n, const char *a, int m, cons
 	return ret;
 }
 
+AlnSta ksw_wrapper(const ScoreParameters &sp, int n, const char *a, int m, const char *b, int bw) {
+	const int MAT_S = abs(sp.mat);
+	const int MIS_P = -abs(sp.mis);
+	const int GAP_O = abs(sp.gap_o);
+	const int GAP_E = abs(sp.gap_e);
+
+	// cerr << n << "\t" << m << endl;
+	// int dollar_n = 0, dollar_m = 0;
+	// for (int i = 0; i < n; i++) dollar_n += a[i] == '$';
+	// for (int i = 0; i < m; i++) dollar_n += b[i] == '$';
+	// cerr << dollar_n << "\t" << dollar_m << endl;
+
+	// TODO: modify KSW code to support score matrix type of int32_t
+	int8_t mat[25];
+	for (int i = 0; i < 4; i++) {
+		for (int j = 0; j < 4; j++) {
+			mat[i * 5 + j] = (i == j) ?MAT_S :MIS_P;
+		}
+	}
+	// It should prevent illegal matching if not overflow
+	for (int k = 0; k < 5; k++) mat[4 * 5 + k] = mat[k * 5 + 4] = -GAP_O * 2 - GAP_E * 2 - 1;
+
+	int8_t base2num[256];
+	memset(base2num, 4, sizeof(base2num));
+	base2num['A'] = base2num['a'] = 0;
+	base2num['C'] = base2num['c'] = 1;
+	base2num['G'] = base2num['g'] = 2;
+	base2num['T'] = base2num['t'] = 3;
+
+	int tl = n, ql = m;
+	uint8_t *ts = (uint8_t*) malloc(tl);
+	uint8_t *qs = (uint8_t*) malloc(ql);
+	for (int i = 0; i < tl; i++) ts[i] = base2num[(uint8_t)a[i]];
+	for (int i = 0; i < ql; i++) qs[i] = base2num[(uint8_t)b[i]];
+
+	ksw_extz_t ez;
+	memset(&ez, 0, sizeof(ksw_extz_t));
+	// extz reported corrupted memory?
+	// ksw_extz(0, ql, qs, tl, ts, 5, mat, GAP_O, GAP_E, bw, -1, 0, &ez);
+	ksw_gg(0, ql, qs, tl, ts,5, mat,GAP_O, GAP_E, bw, &ez.m_cigar, &ez.n_cigar, &ez.cigar);
+
+	AlnSta ret;
+	int pi = 0, pj = 0;
+	for (int i = 0; i < ez.n_cigar; i++) {
+		int op = ez.cigar[i] & 0xf;
+		int num = ez.cigar[i] >> 4;
+		if (op == KSW_CIGAR_MATCH) {
+			for (int k = 0; k < num; k++) {
+				ret.ext_a += a[pi++];
+				ret.ext_b += b[pj++];
+			}
+		} else if (op == KSW_CIGAR_INS) {
+			for (int k = 0; k < num; k++) {
+				ret.ext_a += '-';
+				ret.ext_b += b[pj++];
+			}
+		} else if (op == KSW_CIGAR_DEL) {
+			for (int k = 0; k < num; k++) {
+				ret.ext_a += a[pi++];
+				ret.ext_b += '-';
+			}
+		}
+	}
+
+	// Sanity check
+	{
+		assert(pi == n and pj == m);
+		assert(ret.ext_a.length() == ret.ext_b.length());
+		int i = 0;
+		for (char c: ret.ext_a) {
+			if (c != '-') {
+				assert(c == a[i++]);
+			}
+		}
+		assert(i == n);
+
+		i = 0;
+		for (char c: ret.ext_b) {
+			if (c != '-') {
+				assert(c == b[i++]);
+			}
+		}
+		assert(i == m);
+
+		for (i = 0; i < ret.ext_a.length(); i++) {
+			if (ret.ext_a[i] == UNIT_SI_CHAR) assert(ret.ext_b[i] == '-');
+			if (ret.ext_b[i] == UNIT_SI_CHAR) assert(ret.ext_a[i] == '-');
+		}
+	}
+	kfree(0, ez.cigar);
+	free(ts);
+	free(qs);
+
+	return ret;
+}
+
 struct WdpCell {
 	int E, F, H;
 
@@ -168,13 +270,13 @@ struct WdpCell {
 	}
 };
 
-vector<RepInterval> wraparound_dp(int pat_len, const char *pat_seq, int que_len, const char *que_seq)
+vector<RepInterval> wraparound_dp(const ScoreParameters &sp, int pat_len, const char *pat_seq, int que_len, const char *que_seq)
 {
 	// Classical SI score matrix
-	const int MAT_S = 1;
-	const int MIS_P = -4;
-	const int GAP_O = -6;
-	const int GAP_E = -1;
+	const int MAT_S = sp.mat;
+	const int MIS_P = sp.mis;
+	const int GAP_O = sp.gap_o;
+	const int GAP_E = sp.gap_e;
 
 	const int VERTICAL = 1;
 	const int HORIZONTAL = 2;

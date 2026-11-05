@@ -26,7 +26,9 @@ struct AlnSta {
 
 AlnSta global_cigar(const ScoreParameters &sp, int n, const char *a, int m, const char *b, int bw);
 
-vector<RepInterval> wraparound_dp(int pat_len, const char *pat_seq, int que_len, const char *que_seq);
+AlnSta ksw_wrapper(const ScoreParameters &sp, int n, const char *a, int m, const char *b, int bw);
+
+vector<RepInterval> wraparound_dp(const ScoreParameters &sp, int pat_len, const char *pat_seq, int que_len, const char *que_seq);
 
 struct SgResult {
     int beg, end;
