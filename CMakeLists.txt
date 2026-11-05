@@ -3,9 +3,12 @@ project(zigalign)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O3")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O3")
 
 add_executable(zigalign
         kseq.h
+        ksw2.h
+        ksw2_gg.c
         input_fasta.h
         input_fasta.cpp
         zigalign.h
