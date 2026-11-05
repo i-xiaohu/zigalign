@@ -16,16 +16,18 @@ int usage(const ZigOptions &o) {
     fprintf(stderr, "    -o  output alignment in PAF format, default=stdout\n");
     fprintf(stderr, "    -c  replace M with =X in CIGAR, default=false\n");
     fprintf(stderr, "    -y  output detailed alignment in TSV format, recommended to set\n");
-    fprintf(stderr, "    -S  [mat,mis,gap_o,gap_e] score matrix of SI model, default={%d,%d,%d,%d}\n",
+    fprintf(stderr, "    -I  [mat,mis,gap_o,gap_e] score matrix of SI model, default={%d,%d,%d,%d}\n",
         o.si.mat, o.si.mis, o.si.gap_o, o.si.gap_e);
+    fprintf(stderr, "    -w SI alignment bandwidth, default=%d\n", o.bw_si);
     fprintf(stderr, "    -D  penalty of D transfer, default=%d\n", o.open_tr_pen);
     fprintf(stderr, "    -m  minimum repeat unit size, default=%d\n", o.min_unit_size);
-    fprintf(stderr, "    -F  [mat,mis,gap_o,gap_e] score matrix of self-alignment, default={%d,%d,%d,%d}\n",
+    fprintf(stderr, "    -S  [mat,mis,gap_o,gap_e] score matrix of self-alignment, default={%d,%d,%d,%d}\n",
         o.self_aln.mat, o.self_aln.mis, o.self_aln.gap_o, o.self_aln.gap_e);
     fprintf(stderr, "    -U  [mat,mis,gap_o,gap_e] score matrix of pair-alignment for repeat units, default={%d,%d,%d,%d}\n",
         o.unit_aln.mat, o.unit_aln.mis, o.unit_aln.gap_o, o.unit_aln.gap_e);
     fprintf(stderr, "    -z  maximum deleted repeat units, default=%d\n", o.max_units_del);
     fprintf(stderr, "    -B  penalty of B transfer, default=%d\n", o.close_tr_pen);
+    fprintf(stderr, "    -g  maximum repeat divergency, default=%.2f\n", o.max_tr_div);
     fprintf(stderr, "    -k  minimum repeat count; filtered if fewer, default=%d\n", o.min_reps_cnt);
     fprintf(stderr, "\n");
     return 1;
@@ -55,7 +57,7 @@ int main(int argc, char *argv[]) {
     ZigOptions opt;
     if (argc == 1) return usage(opt);
     int c;
-    while ((c = getopt(argc, argv, "t:o:cy:S:D:m:F:U:z:B:k:l:d:")) >= 0) {
+    while ((c = getopt(argc, argv, "t:o:cy:I:w:D:m:S:U:z:B:g:k:l:d:")) >= 0) {
         switch (c) {
         case 't':
             opt.n_threads = abs(str2int(optarg));
@@ -69,8 +71,11 @@ int main(int argc, char *argv[]) {
         case 'y':
             opt.dsi_fn = optarg;
             break;
-        case 'S':
+        case 'I':
             opt.si = parse_scores(optarg);
+            break;
+        case 'w':
+            opt.bw_si = str2int(optarg);
             break;
         case 'D':
             opt.open_tr_pen = str2int(optarg);
@@ -78,7 +83,7 @@ int main(int argc, char *argv[]) {
         case 'm':
             opt.min_unit_size = str2int(optarg);
             break;
-        case 'F':
+        case 'S':
             opt.self_aln = parse_scores(optarg);
             break;
         case 'U':
@@ -89,6 +94,9 @@ int main(int argc, char *argv[]) {
             break;
         case 'B':
             opt.close_tr_pen = str2int(optarg);
+            break;
+        case 'g':
+            opt.max_tr_div = atof(optarg);
             break;
         case 'k':
             opt.min_reps_cnt = str2int(optarg);

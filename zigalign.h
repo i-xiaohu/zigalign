@@ -16,8 +16,6 @@ using namespace std;
 const int INF = 100000000;
 const int SA_MAX_LEN = 50000; // Self-alignment max length
 const int SA_PART_LEN = 20000;
-const double MIN_MATCH_RATIO = 0.6;
-const double MAX_TR_DIV = 0.4;
 const bool DEBUG = false;
 
 struct ScoreParameters {
@@ -29,6 +27,7 @@ struct ScoreParameters {
 struct ZigOptions {
     // SI model
     ScoreParameters si{1, -4, -6, -1};
+    int bw_si = 5000; // SI bandwidth
     // DSI model
     int open_tr_pen = -12; // D transfer
     int min_unit_size = 100;
@@ -36,6 +35,7 @@ struct ZigOptions {
     ScoreParameters unit_aln{1, -120, -180, -30};
     int max_units_del = 40000;
     int close_tr_pen = -36; // B transfer
+    double max_tr_div = 0.4; // Maximum repeat divergency
     int min_reps_cnt = 20;
 
     int n_threads = 8;

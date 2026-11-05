@@ -348,6 +348,7 @@ vector<TandemRepeats> input_repeats(const string &fn)
 // Test if group B can be merged into group A
 bool merge_tr_test(const ZigOptions &opt, const TandemRepeats &tr_a, const char *seq_a, const TandemRepeats &tr_b, const char *seq_b)
 {
+	const double MAX_TR_DIV = opt.max_tr_div;
 	// Average length is more reliable
 	double len_diff = abs(tr_a.ave_len - tr_b.ave_len) / tr_a.ave_len;
 	if (len_diff > MAX_TR_DIV) return false;
@@ -439,8 +440,6 @@ vector<TandemRepeats> collect_long_repeats(const ZigOptions &opt, int n, const c
 		double c_time = cputime() - c_start, r_time = realtime() - r_start;
 		int n_reps = 0;
 		for (int i = 0; i < n_threads; i++) n_reps += reps_bin[i].size();
-		fprintf(stderr, "Batch %d, offset: %d, reps: %d; CPU: %.2f, Wall: %.2f, Core: %.2f\n",
-			++batch_id, global_os, n_reps, c_time, r_time, c_time / r_time);
 
 		// Bridge adjacent batches
 		for (int i = 0; i < n_threads; i++) {
@@ -459,6 +458,9 @@ vector<TandemRepeats> collect_long_repeats(const ZigOptions &opt, int n, const c
 			}
 		}
 		global_os += n_threads * SA_PART_LEN;
+
+		fprintf(stderr, "Batch %d, offset: %d, reps: %d; CPU: %.2f, Wall: %.2f, Core: %.2f\n",
+			++batch_id, global_os, n_reps, c_time, r_time, c_time / r_time);
 	}
 
 	int new_n = 0;
@@ -642,6 +644,7 @@ int normalize_repeats(const ZigOptions &opt, int n_class,
 	}
 
 	double c_time = cputime(), r_time = realtime();
+	const double MAX_TR_DIV = opt.max_tr_div;
 	const int FLANK_EXT = 10;
 	#pragma omp parallel for
 	for (int k = 0; k < lr_t.size() + lr_q.size(); k++) {
@@ -657,7 +660,7 @@ int normalize_repeats(const ZigOptions &opt, int n_class,
 		r_range = min(len, r_range + (int)round(pat.length() * FLANK_EXT));
 
 		vector<RepInterval> reps = wraparound_dp(
-			pat.length(), pat.data(), r_range - l_range, seq + l_range);
+			opt.self_aln, pat.length(), pat.data(), r_range - l_range, seq + l_range);
 		for (RepInterval &r: reps) {
 			r.beg += l_range;
 			r.end += l_range;
@@ -780,8 +783,9 @@ ScoreMatrix build_score_matrix(const ZigOptions &opt, int n_class,
 			q_sum += r.end - r.beg;
 		}
 	}
-	fprintf(stderr, "T: %d repeats, fraction=%.2f %%\n", n, 100.0 * t_sum / t_len);
-	fprintf(stderr, "Q: %d repeats, fraction=%.2f %%\n", m, 100.0 * q_sum / q_len);
+	double dsi_frac_t = 100.0 * t_sum / t_len, dsi_frac_q = 100.0 * q_sum / q_len;
+	fprintf(stderr, "T: %d repeats, DSI region: %.2f %%, SI region: %.2f\n", n, dsi_frac_t, 100 - dsi_frac_t);
+	fprintf(stderr, "Q: %d repeats, DSI region: %.2f %%, SI region: %.2f\n", m, dsi_frac_q, 100 - dsi_frac_q);
 
 	// Build score matrix of repeat units
 	double t_cpu = cputime(), t_real = realtime();
@@ -1197,7 +1201,7 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 	}
 	assert(jt == del_t.size() and jq == del_q.size());
 
-	const int MAX_BW = 20000;
+	const int MAX_BW = opt.bw_si;
 	#pragma omp parallel for
 	for (GapAndUnit &g: tasks) {
 		int n, m;
@@ -1213,7 +1217,7 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 			t = seq_t + g.aln_t.beg;
 			q = seq_q + g.aln_q.beg;
 		}
-		AlnSta as = global_cigar(opt.si, n, t, m, q, MAX_BW);
+		AlnSta as = ksw_wrapper(opt.si, n, t, m, q, MAX_BW);
 		g.ext_t = as.ext_a;
 		g.ext_q = as.ext_b;
 	}
@@ -1423,6 +1427,7 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 		lr_q = collect_long_repeats(opt, len_q, seq_q);
 		n_class = categorize_repeats(opt, lr_t, seq_t, lr_q, seq_q);
 		n_class = normalize_repeats(opt, n_class, len_t, seq_t, lr_t, len_q, seq_q, lr_q);
+		print_tr_by_class(n_class, lr_t, lr_q);
 		if (opt.log_prefix) {
 			string reps_fn_t = string(opt.log_prefix) + "_t_reps.bin";
 			string reps_fn_q = string(opt.log_prefix) + "_q_reps.bin";
