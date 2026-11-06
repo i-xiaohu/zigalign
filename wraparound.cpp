@@ -186,7 +186,7 @@ AlnSta ksw_wrapper(const ScoreParameters &sp, int n, const char *a, int m, const
 		}
 	}
 	// It should prevent illegal matching if not overflow
-	for (int k = 0; k < 5; k++) mat[4 * 5 + k] = mat[k * 5 + 4] = -GAP_O * 2 - GAP_E * 2 - 1;
+	for (int k = 0; k < 5; k++) mat[4 * 5 + k] = mat[k * 5 + 4] = -128;
 
 	int8_t base2num[256];
 	memset(base2num, 4, sizeof(base2num));
