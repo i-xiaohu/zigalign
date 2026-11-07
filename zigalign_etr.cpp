@@ -5,6 +5,7 @@
 #include "zigalign.h"
 #include "wraparound.h"
 #include "union_set.h"
+#include "edlib.h"
 
 vector<RepInterval> self_alignment(const ZigOptions &opt, int n, const char *seq, vector<vector<Bt1Cell>> &bt)
 {
@@ -625,7 +626,7 @@ string pickout_pattern(const TandemRepeats &tr, const char *seq)
 	return ret;
 }
 
-int normalize_repeats2(const ZigOptions &opt, int n_class,
+int normalize_repeats(const ZigOptions &opt, int n_class,
 	int t_len, const char *t_seq, vector<TandemRepeats> &lr_t,
 	int q_len, const char *q_seq, vector<TandemRepeats> &lr_q)
 {
@@ -660,7 +661,7 @@ int normalize_repeats2(const ZigOptions &opt, int n_class,
 		r_range = min(len, r_range + (int)round(pat.length() * FLANK_EXT));
 
 		vector<RepInterval> reps = wraparound_dp(
-			opt.si, pat.length(), pat.data(), r_range - l_range, seq + l_range);
+			opt.self_aln, pat.length(), pat.data(), r_range - l_range, seq + l_range);
 		for (RepInterval &r: reps) {
 			r.beg += l_range;
 			r.end += l_range;
@@ -676,7 +677,7 @@ int normalize_repeats2(const ZigOptions &opt, int n_class,
 			}
 		}
 		// fprintf(stderr, "left trim %d poor partitions\n", trim_l);
-		for (int i = reps.size() - 1; i >= 0; i--) {
+		for (int i = reps.size()-1; i >= 0; i--) {
 			const RepInterval &r = reps[i];
 			double div = 1.0 * (r.mis + r.gap) / pat.length();
 			if (div > MAX_TR_DIV) {
@@ -696,203 +697,6 @@ int normalize_repeats2(const ZigOptions &opt, int n_class,
 			tr.ave_gap += r.gap;
 			tr.ave_mis += r.mis;
 		}
-
-		int cnt = 0;
-		for (int i = 0; i < tr.repeats.size(); i++) {
-			const RepInterval &r = tr.repeats[i];
-			double div = 1.0 * (r.mis + r.gap) / pat.length();
-			if (div > MAX_TR_DIV) {
-				cnt++;
-			}
-		}
-		fprintf(stderr, "size = %ld, cnt = %d, frac = %.2f\n", tr.repeats.size(), cnt, 100.0 * cnt / tr.repeats.size());
-
-		if (cnt > tr.repeats.size() / 2) tr.repeats.clear();
-		// Repeats might be empty when no clear partitions emerge
-		if (not tr.repeats.empty()) tr.ave_len /= tr.repeats.size();
-		if (tr.repeats.size() > 1) tr.ave_gap /= (tr.repeats.size() - 1);
-		if (tr.repeats.size() > 1) tr.ave_mis /= (tr.repeats.size() - 1);
-	}
-
-	// FIXME: it shouldn't happen
-	for (int i = 0; i < lr_t.size() - 1; i++) {
-		int beg = lr_t[i+1].repeats.front().beg;
-		vector<RepInterval> &reps = lr_t[i].repeats;
-		int m = reps.size();
-		for (int j = reps.size()-1; j >= 0; j--) {
-			const RepInterval &r = reps[j];
-			if (r.end > beg) {
-				m--;
-			} else {
-				break;
-			}
-		}
-		reps.resize(m);
-	}
-	for (int i = 0; i < lr_q.size() - 1; i++) {
-		int beg = lr_q[i+1].repeats.front().beg;
-		vector<RepInterval> &reps = lr_q[i].repeats;
-		int m = reps.size();
-		for (int j = reps.size()-1; j >= 0; j--) {
-			const RepInterval &r = reps[j];
-			if (r.end > beg) {
-				m--;
-			} else {
-				break;
-			}
-		}
-		reps.resize(m);
-	}
-
-	int poor_tr = 0;
-	const int MIN_REP_CNT = opt.min_reps_cnt;
-	int old_n = 0;
-	for (int i = 0; i < lr_t.size(); i++) {
-		if (lr_t[i].repeats.size() < MIN_REP_CNT) {
-			poor_tr++;
-		} else {
-			lr_t[old_n++] = lr_t[i];
-		}
-	}
-	lr_t.resize(old_n);
-	old_n = 0;
-	for (int i = 0; i < lr_q.size(); i++) {
-		if (lr_q[i].repeats.size() < MIN_REP_CNT) {
-			poor_tr++;
-		} else {
-			lr_q[old_n++] = lr_q[i];
-		}
-	}
-	lr_q.resize(old_n);
-	n_class = update_pid(lr_t, lr_q);
-
-	fprintf(stderr, "Partition tandem repeats in %.2f CPU sec, %.2f real sec\n",
-		cputime()-c_time, realtime()-r_time);
-	return n_class;
-}
-
-int normalize_repeats(const ZigOptions &opt, int n_class,
-	int t_len, const char *t_seq, vector<TandemRepeats> &lr_t,
-	int q_len, const char *q_seq, vector<TandemRepeats> &lr_q)
-{
-	vector<string> patterns(n_class);
-	for (const TandemRepeats &tr: lr_t) {
-		int pid = tr.pid;
-		if (patterns[pid].empty()) {
-			patterns[pid] = pickout_pattern(tr, t_seq);
-		}
-	}
-	for (const TandemRepeats &tr: lr_q) {
-		int pid = tr.pid;
-		if (patterns[pid].empty()) {
-			patterns[pid] = pickout_pattern(tr, q_seq);
-		}
-	}
-
-	double c_time = cputime(), r_time = realtime();
-	const double MAX_TR_DIV = opt.max_tr_div;
-	#pragma omp parallel for
-	for (int k = 0; k < lr_t.size() + lr_q.size(); k++) {
-		TandemRepeats &tr = k < lr_t.size() ?lr_t[k] :lr_q[k - lr_t.size()];
-		const char *seq = k < lr_t.size() ?t_seq :q_seq;
-		int len = k < lr_t.size() ?t_len :q_len;
-
-		const string &pat = patterns[tr.pid];
-		int l_range = tr.repeats.front().beg;
-		int r_range = tr.repeats.back().end;
-		// This is for the missed flanking repeats
-		const int FLANK_EXT = 20;
-		l_range = max(0, l_range - (int)round(pat.length() * FLANK_EXT));
-		r_range = min(len, r_range + (int)round(pat.length() * FLANK_EXT));
-
-		// Find the best aligned segment in the middle
-		int mid = (l_range + r_range) / 2;
-		int sl = max(mid - (int)pat.length() * 10, l_range);
-		int sr = min(mid + (int)pat.length() * 10, r_range);
-		SgResult sg = semi_global(opt.self_aln, pat.length(), pat.data(), sr - sl, seq + sl);
-		int pos = sg.beg + sl;
-		if (0) {
-			fprintf(stderr, "[%c] ", k < lr_t.size() ? 'T' :'Q');
-			fprintf(stderr, "range [%d, %d), length=%d, sl [%d, %d), length=%d\n",
-				l_range, r_range, r_range - l_range, sl, sr, sr - sl);
-			fprintf(stderr, "pos = %d, [%d, %d), score=%d, mis=%d, gap=%d\n", pos, sg.beg, sg.end, sg.score, sg.mis, sg.gap);
-		}
-
-		// Forward extension
-		vector<RepInterval> reps_f = wraparound_dp(opt.self_aln,
-			pat.length(), pat.data(),  r_range - pos, seq + pos);
-		for (RepInterval &r: reps_f) {
-			r.beg += pos;
-			r.end += pos;
-		}
-		int trim_n = 0;
-		for (int i = reps_f.size() - 1; i >= 0; i--) {
-			const RepInterval &r = reps_f[i];
-			double div = 1.0 * (r.mis + r.gap) / pat.length();
-			if (div > MAX_TR_DIV) {
-				trim_n++;
-			} else {
-				break;
-			}
-		}
-		reps_f.resize(reps_f.size() - trim_n);
-		// fprintf(stderr, "forward trim: %d\n", trim_n);
-
-		// Backward extension
-		string rev_pat = pat;
-		reverse(rev_pat.begin(), rev_pat.end());
-		string rev_ext;
-		for (int i = pos - 1; i >= l_range; i--) {
-			rev_ext.push_back(seq[i]);
-		}
-		vector<RepInterval> reps_b = wraparound_dp(opt.self_aln,
-			rev_pat.length(), rev_pat.data(),  rev_ext.length(), rev_ext.data());
-		for (RepInterval &r: reps_b) {
-			int tmp = r.beg;
-			r.beg = pos - r.end;
-			r.end = pos - tmp;
-		}
-		trim_n = 0;
-		for (int i = reps_b.size() - 1; i >= 0; i--) {
-			const RepInterval &r = reps_b[i];
-			double div = 1.0 * (r.mis + r.gap) / pat.length();
-			if (div > MAX_TR_DIV) {
-				trim_n++;
-			} else {
-				break;
-			}
-		}
-		reps_b.resize(reps_b.size() - trim_n);
-		// fprintf(stderr, "backward trim: %d\n", trim_n);
-
-		tr.ave_len = tr.ave_gap = tr.ave_mis = 0;
-		fprintf(stderr, "original size = %ld\n", tr.repeats.size());
-		tr.repeats.clear();
-		for (int i = reps_b.size() - 1; i >= 0; i--) {
-			const RepInterval &r = reps_b[i];
-			tr.repeats.push_back(r);
-			tr.ave_len += r.end - r.beg;
-			tr.ave_gap += r.gap;
-			tr.ave_mis += r.mis;
-		}
-		for (const RepInterval &r: reps_f) {
-			tr.repeats.push_back(r);
-			tr.ave_len += r.end - r.beg;
-			tr.ave_gap += r.gap;
-			tr.ave_mis += r.mis;
-		}
-
-		int cnt = 0;
-		for (int i = 0; i < tr.repeats.size(); i++) {
-			const RepInterval &r = tr.repeats[i];
-			double div = 1.0 * (r.mis + r.gap) / pat.length();
-			if (div > MAX_TR_DIV) {
-				cnt++;
-			}
-		}
-		fprintf(stderr, "size = %ld, cnt = %d, frac = %.2f\n", tr.repeats.size(), cnt, 100.0 * cnt / tr.repeats.size());
-		if (cnt > tr.repeats.size() / 2) tr.repeats.clear();
-
 		// Repeats might be empty when no clear partitions emerge
 		if (not tr.repeats.empty()) tr.ave_len /= tr.repeats.size();
 		if (tr.repeats.size() > 1) tr.ave_gap /= (tr.repeats.size() - 1);
@@ -1319,6 +1123,74 @@ string cigar_to_str(const CigarExt &ce) {
 	return ret;
 }
 
+struct FinalAlnStat
+{
+	int si_mat = 0, si_mis = 0, si_ins = 0, si_del = 0;
+	int u_aln = 0, u_ins = 0, u_del = 0;
+	int b_mat = 0, b_mis = 0, b_ins = 0, b_del = 0;
+};
+
+FinalAlnStat stat_final_ed(const vector<CigarExt> &ces, int len_t, const char *seq_t, int len_q, const char *seq_q)
+{
+	int pi = 0, pj = 0;
+	FinalAlnStat f;
+	for (const CigarExt &ce: ces) {
+		if (ce.pid == -1) { // SI
+			for (int i = 0; i < ce.op.size(); i++) {
+				if (ce.op[i] == 'I') {
+					f.si_ins += ce.num[i];
+					pj += ce.num[i];
+				} else if (ce.op[i] == 'D') {
+					f.si_del += ce.num[i];
+					pi += ce.num[i];
+				} else {
+					for (int j = 0; j < ce.num[i]; j++) {
+						f.si_mat += seq_t[pi] == seq_q[pj];
+						f.si_mis += seq_t[pi] != seq_q[pj];
+						pi++;
+						pj++;
+					}
+				}
+			}
+		} else { // DSI
+			if (ce.op.size() == 1 and ce.op[0] == 'I') {
+				f.u_ins++;
+				f.b_ins += ce.num[0];
+				pj += ce.num[0];
+			} else if (ce.op.size() == 1 and ce.op[0] == 'D') {
+				f.u_del++;
+				f.b_del += ce.num[0];
+				pi += ce.num[0];
+			} else {
+				f.u_aln++;
+				for (int i = 0; i < ce.op.size(); i++) {
+					if (ce.op[i] == 'I') {
+						f.b_ins += ce.num[i];
+						pj += ce.num[i];
+					} else if (ce.op[i] == 'D') {
+						f.b_del += ce.num[i];
+						pi += ce.num[i];
+					} else {
+						for (int j = 0; j < ce.num[i]; j++) {
+							f.b_mat += seq_t[pi] == seq_q[pj];
+							f.b_mis += seq_t[pi] != seq_q[pj];
+							pi++;
+							pj++;
+						}
+					}
+				}
+			}
+		}
+	}
+	assert(pi == len_t and pj == len_q);
+	fprintf(stderr, "Final alignment:\n");
+	fprintf(stderr, "  SI: %d mat, %d mis, %d ins, %d del\n", f.si_mat, f.si_mis, f.si_ins, f.si_del);
+	fprintf(stderr, "  DSI(base): %d mat, %d mis, %d ins, %d del\n", f.b_mat, f.b_mis, f.b_ins, f.b_del);
+	fprintf(stderr, "  DSI(unit): %d aln, %d ins, %d del\n", f.u_aln, f.u_ins, f.u_del);
+	fprintf(stderr, "\n");
+	return f;
+}
+
 struct GapAndUnit {
 	bool si_gap;
 	string seq_t, seq_q;
@@ -1504,65 +1376,6 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 		assert(pi == len_t and pj == len_q);
 		assert(string(seq_t) == t and string(seq_q) == q);
 	}
-
-	int si_mat = 0, si_mis = 0, si_ins = 0, si_del = 0;
-	int u_aln = 0, u_ins = 0, u_del = 0;
-	int b_mat = 0, b_mis = 0, b_ins = 0, b_del = 0;
-	pi = pj = 0;
-	for (const CigarExt &ce: ret) {
-		if (ce.pid == -1) { // SI
-			for (int i = 0; i < ce.op.size(); i++) {
-				if (ce.op[i] == 'I') {
-					si_ins += ce.num[i];
-					pj += ce.num[i];
-				} else if (ce.op[i] == 'D') {
-					si_del += ce.num[i];
-					pi += ce.num[i];
-				} else {
-					for (int j = 0; j < ce.num[i]; j++) {
-						si_mat += seq_t[pi] == seq_q[pj];
-						si_mis += seq_t[pi] != seq_q[pj];
-						pi++;
-						pj++;
-					}
-				}
-			}
-		} else { // DSI
-			if (ce.op.size() == 1 and ce.op[0] == 'I') {
-				u_ins++;
-				b_ins += ce.num[0];
-				pj += ce.num[0];
-			} else if (ce.op.size() == 1 and ce.op[0] == 'D') {
-				u_del++;
-				b_del += ce.num[0];
-				pi += ce.num[0];
-			} else {
-				u_aln++;
-				for (int i = 0; i < ce.op.size(); i++) {
-					if (ce.op[i] == 'I') {
-						b_ins += ce.num[i];
-						pj += ce.num[i];
-					} else if (ce.op[i] == 'D') {
-						b_del += ce.num[i];
-						pi += ce.num[i];
-					} else {
-						for (int j = 0; j < ce.num[i]; j++) {
-							b_mat += seq_t[pi] == seq_q[pj];
-							b_mis += seq_t[pi] != seq_q[pj];
-							pi++;
-							pj++;
-						}
-					}
-				}
-			}
-		}
-	}
-	assert(pi == len_t and pj == len_q);
-	fprintf(stderr, "Final alignment:\n");
-	fprintf(stderr, "  SI: %d mat, %d mis, %d ins, %d del\n", si_mat, si_mis, si_ins, si_del);
-	fprintf(stderr, "  DSI(base): %d mat, %d mis, %d ins, %d del\n", b_mat, b_mis, b_ins, b_del);
-	fprintf(stderr, "  DSI(unit): %d aln, %d ins, %d del\n", u_aln, u_ins, u_del);
-	fprintf(stderr, "\n");
 	return ret;
 }
 
@@ -1609,6 +1422,39 @@ void print_dsi_result(const char *fn, const vector<CigarExt> &cigar_ext) {
 	fclose(fo);
 }
 
+void SI_align_test(const ZigOptions &opt, int len_t, const char *seq_t, int len_q, const char *seq_q, vector<CigarExt> &ces, const FinalAlnStat &fas)
+{
+	// SI(indel + mismatch) + DSI(duplication_indel + mismatch)
+	int ed = fas.si_del + fas.si_ins + fas.si_mis + fas.u_del + fas.u_ins + fas.b_mis;
+	EdlibAlignResult result = edlibAlign(seq_t, len_t,seq_q, len_q,
+		edlibNewAlignConfig(ed, EDLIB_MODE_NW, EDLIB_TASK_PATH, NULL, 0)	);
+	if (result.editDistance < 0 or result.editDistance >= ed) {
+		edlibFreeAlignResult(result);
+		return;
+	}
+
+	fprintf(stderr, "DSI alignment is not optimal, SI alignment will be performed\n");
+	char* cigar = edlibAlignmentToCigar(result.alignment, result.alignmentLength, EDLIB_CIGAR_STANDARD);
+	int num = 0, sum_i = 0, sum_d = 0;
+	for (int i = 0; cigar[i]; i++) {
+		if (cigar[i] >= '0' and cigar[i] <= '9') {
+			num = num * 10 + (cigar[i] - '0');
+		} else {
+			if (cigar[i] == 'I')  sum_i += num;
+			else if (cigar[i] == 'D') sum_d += num;
+			num = 0;
+		}
+	}
+	free(cigar);
+	edlibFreeAlignResult(result);
+
+	int bw = max(sum_i, sum_d) + 50;
+	AlnSta x = ksw_wrapper(opt.si, len_t, seq_t, len_q, seq_q, bw);
+	ces.clear();
+	CigarExt ce = parse_aligned_seq(x.ext_a.length(), x.ext_a.data(), x.ext_b.data(), opt.cigar_neq);
+	ces.push_back(ce);
+}
+
 const int STAGE_COLLECT = 0;
 const int STAGE_NORMALIZE = 1;
 const int STAGE_MATRIX = 2;
@@ -1645,7 +1491,7 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	}
 
 	if (opt.dev_label[STAGE_NORMALIZE] == '1') {
-		n_class = normalize_repeats2(opt, n_class, len_t, seq_t, lr_t, len_q, seq_q, lr_q);
+		n_class = normalize_repeats(opt, n_class, len_t, seq_t, lr_t, len_q, seq_q, lr_q);
 		print_tr_by_class(n_class, lr_t, lr_q);
 		if (opt.log_prefix) {
 			string reps_fn_t = string(opt.log_prefix) + "_t_reps2.bin";
@@ -1694,6 +1540,8 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 	}
 
 	vector<CigarExt> cigar_ext = fill_SI_gap(opt, len_t, seq_t, profile_t, len_q, seq_q, profile_q);
+	FinalAlnStat fas = stat_final_ed(cigar_ext, len_t, seq_t, len_q, seq_q);
+	SI_align_test(opt, len_t, seq_t, len_q, seq_q, cigar_ext, fas);
 	print_paf_result(opt.paf_fn, name_t, len_t, name_q, len_q, cigar_ext);
 	print_dsi_result(opt.dsi_fn, cigar_ext);
 }
