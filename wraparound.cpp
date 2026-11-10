@@ -215,7 +215,11 @@ AlnSta ksw_wrapper(const ScoreParameters &sp, int n, const char *a, int m, const
 	// ksw_extz(0, ql, qs, tl, ts, 4, mat, GAP_O, GAP_E, bw, -1, 0, &ez);
 	// ksw_gg reported segmental fault
 	// ksw_gg(0, ql, qs, tl, ts,4, mat,GAP_O, GAP_E, bw, &ez.m_cigar, &ez.n_cigar, &ez.cigar);
+#ifdef __SSE2__
+	ksw_extz2_sse(0, ql, qs, tl, ts, 4, mat, GAP_O, GAP_E, bw, -1, 0, -1, &ez);
+#else
 	ksw_gg2(0, ql, qs, tl, ts,4, mat,GAP_O, GAP_E, bw, &ez.m_cigar, &ez.n_cigar, &ez.cigar);
+#endif
 
 	AlnSta ret;
 	int pi = 0, pj = 0;
