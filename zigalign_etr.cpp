@@ -1468,15 +1468,34 @@ void SI_align_test(const ZigOptions &opt, int len_t, const char *seq_t, int len_
 			num = 0;
 		}
 	}
-	free(cigar);
-	edlibFreeAlignResult(result);
 
 	int bw = max(sum_i, sum_d) + 50;
-	AlnSta x = ksw_wrapper(opt.si, len_t, seq_t, len_q, seq_q, bw);
+	long memory_matrix = long(len_t + len_q) * bw * 16;
 	ces.clear();
-	CigarExt ce = parse_aligned_seq(x.ext_a.length(), x.ext_a.data(), x.ext_b.data(), opt.cigar_neq);
+	CigarExt ce;
+	if (memory_matrix / 1e9 > 64) {
+		fprintf(stderr, "Memory cost of backtrace matrix > 64GB, affine-gap is not supported\n");
+		num = 0;
+		for (int i = 0; cigar[i]; i++) {
+			if (cigar[i] >= '0' and cigar[i] <= '9') {
+				num = num * 10 + (cigar[i] - '0');
+			} else {
+				if (cigar[i] == 'I') ce.op.push_back('D');
+				else if (cigar[i] == 'D') ce.op.push_back('I');
+				else ce.op.push_back(cigar[i]);
+				ce.num.push_back(num);
+				num = 0;
+			}
+		}
+	} else {
+		AlnSta x = ksw_wrapper(opt.si, len_t, seq_t, len_q, seq_q, bw);
+		ce = parse_aligned_seq(x.ext_a.length(), x.ext_a.data(), x.ext_b.data(), opt.cigar_neq);
+	}
 	ces.push_back(ce);
 	fas = stat_final_ed(ces, len_t, seq_t, len_q, seq_q);
+
+	free(cigar);
+	edlibFreeAlignResult(result);
 }
 
 const int STAGE_COLLECT = 0;

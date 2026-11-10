@@ -216,7 +216,7 @@ AlnSta ksw_wrapper(const ScoreParameters &sp, int n, const char *a, int m, const
 	// ksw_gg reported segmental fault
 	// ksw_gg(0, ql, qs, tl, ts,4, mat,GAP_O, GAP_E, bw, &ez.m_cigar, &ez.n_cigar, &ez.cigar);
 #ifdef __SSE2__
-	ksw_extz2_sse(0, ql, qs, tl, ts, 4, mat, GAP_O, GAP_E, bw, -1, 0, -1, &ez);
+	ksw_extz2_sse(0, ql, qs, tl, ts, 4, mat, GAP_O, GAP_E, bw, -1, 0, 0, &ez);
 #else
 	ksw_gg2(0, ql, qs, tl, ts,4, mat,GAP_O, GAP_E, bw, &ez.m_cigar, &ez.n_cigar, &ez.cigar);
 #endif
@@ -242,6 +242,15 @@ AlnSta ksw_wrapper(const ScoreParameters &sp, int n, const char *a, int m, const
 				ret.ext_b += '-';
 			}
 		}
+	}
+	// It happens if out of band
+	for (; pi < n; pi++) {
+		ret.ext_a += a[pi];
+		ret.ext_b += '-';
+	}
+	for (; pj < m; pj++) {
+		ret.ext_a += '-';
+		ret.ext_b += b[pj];
 	}
 
 	// Sanity check
