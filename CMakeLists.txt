@@ -10,7 +10,7 @@ add_executable(zigalign
         edlib.h
         kseq.h
         ksw2.h
-        ksw2_gg.c
+        ksw2_gg2.c
         input_fasta.h
         input_fasta.cpp
         zigalign.h

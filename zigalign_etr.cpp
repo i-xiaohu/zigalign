@@ -1183,24 +1183,19 @@ FinalAlnStat stat_final_ed(const vector<CigarExt> &ces, int len_t, const char *s
 		}
 	}
 	assert(pi == len_t and pj == len_q);
-	fprintf(stderr, "Final alignment:\n");
-	fprintf(stderr, "  SI: %d mat, %d mis, %d ins, %d del\n", f.si_mat, f.si_mis, f.si_ins, f.si_del);
-	fprintf(stderr, "  DSI(base): %d mat, %d mis, %d ins, %d del\n", f.b_mat, f.b_mis, f.b_ins, f.b_del);
-	fprintf(stderr, "  DSI(unit): %d aln, %d ins, %d del\n", f.u_aln, f.u_ins, f.u_del);
-	fprintf(stderr, "\n");
 	return f;
 }
 
-struct GapAndUnit {
-	bool si_gap;
+struct SiAlnTask {
+	bool si_region;
 	string seq_t, seq_q;
-	vector<Dp2Profile> del_t, del_q;
+	vector<pair<int,Dp2Profile>> ins_pos_t, ins_pos_q;
 	Dp2Profile aln_t, aln_q;
 	string ext_t, ext_q; // Alignment result
-	GapAndUnit(bool gap): si_gap(gap), aln_t(), aln_q() {}
+	SiAlnTask(bool sir): si_region(sir), aln_t(), aln_q() {}
 };
 
-vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
+vector<CigarExt> process_SI_region(const ZigOptions &opt,
 	int len_t, const char *seq_t, vector<Dp2Profile> &pro_t,
 	int len_q, const char *seq_q, vector<Dp2Profile> &pro_q)
 {
@@ -1216,53 +1211,45 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 		if (p.aln == -1) del_q.push_back(p);
 	}
 
-	vector<GapAndUnit> tasks;
+	vector<SiAlnTask> tasks;
 	int jt = 0, jq = 0;
 	for (int i = 0; i <= aln_t.size(); i++) {
 		int gap_t_beg = i == 0 ?0 :aln_t[i-1].end, gap_t_end = i == aln_q.size() ?len_t :aln_t[i].beg;
 		int gap_q_beg = i == 0 ?0 :aln_q[i-1].end, gap_q_end = i == aln_q.size() ?len_q :aln_q[i].beg;
 
-		// Deleted units within the gap
-		GapAndUnit gap(true);
+		// Deleted units within the SI region
+		SiAlnTask region(true);
 		int last_pos = gap_t_beg;
 		for (; jt < del_t.size(); jt++) {
 			int b = del_t[jt].beg, e = del_t[jt].end;
 			if (b >= gap_t_beg and e <= gap_t_end) {
-				for (int j = last_pos; j < b; j++) gap.seq_t.push_back(seq_t[j]);
-				gap.seq_t.push_back(UNIT_SI_CHAR);
+				for (int j = last_pos; j < b; j++) region.seq_t.push_back(seq_t[j]);
 				Dp2Profile x = del_t[jt];
-				gap.del_t.push_back(x);
+				region.ins_pos_t.push_back({region.seq_t.size(), x});
 				last_pos = x.end;
 			} else if (b >= gap_t_end) {
 				break;
 			}
 		}
-		for (int j = last_pos; j < gap_t_end; j++) {
-			gap.seq_t.push_back(seq_t[j]);
-		}
+		for (int j = last_pos; j < gap_t_end; j++) region.seq_t.push_back(seq_t[j]);
 
 		last_pos = gap_q_beg;
 		for (; jq < del_q.size(); jq++) {
 			int b = del_q[jq].beg, e = del_q[jq].end;
 			if (b >= gap_q_beg and e <= gap_q_end) {
-				for (int j = last_pos; j < b; j++) gap.seq_q.push_back(seq_q[j]);
-				gap.seq_q.push_back(UNIT_SI_CHAR);
+				for (int j = last_pos; j < b; j++) region.seq_q.push_back(seq_q[j]);
 				Dp2Profile x = del_q[jq];
-				gap.del_q.push_back(x);
+				region.ins_pos_q.push_back({region.seq_q.size(), x});
 				last_pos = x.end;
 			} else if (b >= gap_q_end) {
 				break;
 			}
 		}
-		for (int j = last_pos; j < gap_q_end; j++) {
-			gap.seq_q.push_back(seq_q[j]);
-		}
-		if (not gap.seq_t.empty() or not gap.seq_q.empty()) {
-			tasks.push_back(gap);
-		}
+		for (int j = last_pos; j < gap_q_end; j++) region.seq_q.push_back(seq_q[j]);
+		tasks.push_back(region);
 
 		if (i < aln_t.size()) {
-			GapAndUnit unit(false);
+			SiAlnTask unit(false);
 			unit.aln_t = aln_t[i];
 			unit.aln_q = aln_q[i];
 			tasks.push_back(unit);
@@ -1272,10 +1259,10 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 
 	const int MAX_BW = opt.bw_si;
 	#pragma omp parallel for
-	for (GapAndUnit &g: tasks) {
+	for (SiAlnTask &g: tasks) {
 		int n, m;
 		const char *t, *q;
-		if (g.si_gap) {
+		if (g.si_region) {
 			n = g.seq_t.length();
 			m = g.seq_q.length();
 			t = g.seq_t.data();
@@ -1293,15 +1280,47 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 
 	int pi = 0, pj = 0;
 	vector<CigarExt> ret;
-	for (const GapAndUnit &g: tasks) {
-		if (g.si_gap) {
+	for (const SiAlnTask &g: tasks) {
+		if (g.si_region) {
 			// Insert deleted repeats back
 			int last_pos = 0;
-			jt = jq = 0;
+			int bt = 0, bq = 0; // Base pointer
+			int gt = 0, gq = 0; // Gap pointer
+
+			// Leading insertions
+			while (gt < g.ins_pos_t.size() and g.ins_pos_t[gt].first == 0) {
+				const Dp2Profile &pt = g.ins_pos_t[gt].second;
+				CigarExt ce;
+				ce.pid = pt.pid;
+				ce.op.push_back('D');
+				ce.num.push_back(pt.end - pt.beg);
+				ret.push_back(ce);
+				assert(pi == pt.beg);
+				move_pointer(pi, pj, ce);
+				assert(pi == pt.end);
+				gt++;
+			}
+			while (gq < g.ins_pos_q.size() and g.ins_pos_q[gq].first == 0) {
+				const Dp2Profile &pq = g.ins_pos_q[gq].second;
+				CigarExt ce;
+				ce.pid = pq.pid;
+				ce.op.push_back('I');
+				ce.num.push_back(pq.end - pq.beg);
+				ret.push_back(ce);
+				assert(pj == pq.beg);
+				move_pointer(pi, pj, ce);
+				assert(pj == pq.end);
+				gq++;
+			}
+
 			for (int i = 0; i < g.ext_t.length(); i++) {
-				if (g.ext_t[i] == UNIT_SI_CHAR or g.ext_q[i] == UNIT_SI_CHAR) {
-					if (i > last_pos) {
-						CigarExt ce = parse_aligned_seq(i - last_pos,
+				if (g.ext_t[i] != '-') bt++;
+				if (g.ext_q[i] != '-') bq++;
+				// Insert SI region
+				if((gt < g.ins_pos_t.size() and g.ins_pos_t[gt].first == bt) or
+					(gq < g.ins_pos_q.size() and g.ins_pos_q[gq].first == bq)) {
+					if (i >= last_pos) {
+						CigarExt ce = parse_aligned_seq(i - last_pos + 1,
 							g.ext_t.data() + last_pos, g.ext_q.data() + last_pos, opt.cigar_neq);
 						ce.pid = -1;
 						ret.push_back(ce);
@@ -1310,8 +1329,8 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 					last_pos = i + 1;
 				}
 
-				if (g.ext_t[i] == UNIT_SI_CHAR) {
-					const Dp2Profile &pt = g.del_t[jt++];
+				while(gt < g.ins_pos_t.size() and g.ins_pos_t[gt].first == bt) {
+					const Dp2Profile &pt = g.ins_pos_t[gt].second;
 					CigarExt ce;
 					ce.pid = pt.pid;
 					ce.op.push_back('D');
@@ -1320,8 +1339,10 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 					assert(pi == pt.beg);
 					move_pointer(pi, pj, ce);
 					assert(pi == pt.end);
-				} else if (g.ext_q[i] == UNIT_SI_CHAR) {
-					const Dp2Profile &pq = g.del_q[jq++];
+					gt++;
+				}
+				while (gq < g.ins_pos_q.size() and g.ins_pos_q[gq].first == bq) {
+					const Dp2Profile &pq = g.ins_pos_q[gq].second;
 					CigarExt ce;
 					ce.pid = pq.pid;
 					ce.op.push_back('I');
@@ -1330,9 +1351,10 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 					assert(pj == pq.beg);
 					move_pointer(pi, pj, ce);
 					assert(pj == pq.end);
+					gq++;
 				}
 			}
-			assert(jt == g.del_t.size() and jq == g.del_q.size());
+			assert(gt == g.ins_pos_t.size() and gq == g.ins_pos_q.size());
 			if (g.ext_t.length() > last_pos) {
 				CigarExt ce = parse_aligned_seq(g.ext_t.length() - last_pos,
 					g.ext_t.data() + last_pos, g.ext_q.data() + last_pos, opt.cigar_neq);
@@ -1344,6 +1366,7 @@ vector<CigarExt> fill_SI_gap(const ZigOptions &opt,
 			CigarExt ce = parse_aligned_seq(g.ext_t.length(), g.ext_t.data(), g.ext_q.data(), opt.cigar_neq);
 			ce.pid = g.aln_t.pid;
 			ret.push_back(ce);
+			// fprintf(stderr, "%d %d %d %d\n", pi, g.aln_t.beg, pj, g.aln_q.beg);
 			assert(pi == g.aln_t.beg and pj == g.aln_q.beg);
 			move_pointer(pi, pj, ce);
 			assert(pi == g.aln_t.end and pj == g.aln_q.end);
@@ -1422,7 +1445,7 @@ void print_dsi_result(const char *fn, const vector<CigarExt> &cigar_ext) {
 	fclose(fo);
 }
 
-void SI_align_test(const ZigOptions &opt, int len_t, const char *seq_t, int len_q, const char *seq_q, vector<CigarExt> &ces, const FinalAlnStat &fas)
+void SI_align_test(const ZigOptions &opt, int len_t, const char *seq_t, int len_q, const char *seq_q, vector<CigarExt> &ces, FinalAlnStat &fas)
 {
 	// SI(indel + mismatch) + DSI(duplication_indel + mismatch)
 	int ed = fas.si_del + fas.si_ins + fas.si_mis + fas.u_del + fas.u_ins + fas.b_mis;
@@ -1453,6 +1476,7 @@ void SI_align_test(const ZigOptions &opt, int len_t, const char *seq_t, int len_
 	ces.clear();
 	CigarExt ce = parse_aligned_seq(x.ext_a.length(), x.ext_a.data(), x.ext_b.data(), opt.cigar_neq);
 	ces.push_back(ce);
+	fas = stat_final_ed(ces, len_t, seq_t, len_q, seq_q);
 }
 
 const int STAGE_COLLECT = 0;
@@ -1539,9 +1563,15 @@ void align_etr(const ZigOptions &opt, const char *fn_t, const char *fn_q)
 		input_profile(profile_fn, profile_t, profile_q);
 	}
 
-	vector<CigarExt> cigar_ext = fill_SI_gap(opt, len_t, seq_t, profile_t, len_q, seq_q, profile_q);
+	vector<CigarExt> cigar_ext = process_SI_region(opt, len_t, seq_t, profile_t, len_q, seq_q, profile_q);
 	FinalAlnStat fas = stat_final_ed(cigar_ext, len_t, seq_t, len_q, seq_q);
 	SI_align_test(opt, len_t, seq_t, len_q, seq_q, cigar_ext, fas);
 	print_paf_result(opt.paf_fn, name_t, len_t, name_q, len_q, cigar_ext);
 	print_dsi_result(opt.dsi_fn, cigar_ext);
+
+	fprintf(stderr, "Final alignment:\n");
+	fprintf(stderr, "  SI: %d mat, %d mis, %d ins, %d del\n", fas.si_mat, fas.si_mis, fas.si_ins, fas.si_del);
+	fprintf(stderr, "  DSI(base): %d mat, %d mis, %d ins, %d del\n", fas.b_mat, fas.b_mis, fas.b_ins, fas.b_del);
+	fprintf(stderr, "  DSI(unit): %d aln, %d ins, %d del\n", fas.u_aln, fas.u_ins, fas.u_del);
+	fprintf(stderr, "\n");
 }
